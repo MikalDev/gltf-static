@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="cubeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4a90d9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2c5aa0;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- 3D Cube representation -->
+  <polygon points="32,8 52,20 52,44 32,56 12,44 12,20" fill="url(#cubeGrad)" stroke="#1a3a6e" stroke-width="2"/>
+  <polygon points="32,8 52,20 32,32 12,20" fill="#6ab0ff" stroke="#1a3a6e" stroke-width="1"/>
+  <polygon points="32,32 52,20 52,44 32,56" fill="#3d7bc7" stroke="#1a3a6e" stroke-width="1"/>
+  <polygon points="32,32 12,20 12,44 32,56" fill="#2a5f9e" stroke="#1a3a6e" stroke-width="1"/>
+  <!-- glTF text hint -->
+  <text x="32" y="38" font-family="Arial, sans-serif" font-size="8" fill="white" text-anchor="middle" font-weight="bold">glTF</text>
+</svg>

@@ -1,0 +1,60 @@
+{
+	"gltf": {
+		"conditions": [
+			{
+				"id": "is-loaded",
+				"scriptName": "IsLoaded",
+				"highlight": false
+			}
+		],
+		"actions": [
+			{
+				"id": "load-model",
+				"scriptName": "LoadModel",
+				"highlight": true,
+				"params": [
+					{
+						"id": "url",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "set-rotation",
+				"scriptName": "SetRotation",
+				"highlight": false,
+				"params": [
+					{
+						"id": "x",
+						"type": "number"
+					},
+					{
+						"id": "y",
+						"type": "number"
+					},
+					{
+						"id": "z",
+						"type": "number"
+					}
+				]
+			}
+		],
+		"expressions": [
+			{
+				"id": "rotation-x",
+				"expressionName": "RotationX",
+				"returnType": "number"
+			},
+			{
+				"id": "rotation-y",
+				"expressionName": "RotationY",
+				"returnType": "number"
+			},
+			{
+				"id": "rotation-z",
+				"expressionName": "RotationZ",
+				"returnType": "number"
+			}
+		]
+	}
+}

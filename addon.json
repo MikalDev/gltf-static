@@ -1,0 +1,34 @@
+{
+	"is-c3-addon": true,
+	"sdk-version": 2,
+	"min-construct-version": "r401",
+	"type": "plugin",
+	"name": "glTF Static",
+	"id": "GltfStatic",
+	"version": "1.0.0.0",
+	"author": "Mikal",
+	"website": "https://github.com/MikalDev/gltf-static",
+	"documentation": "https://github.com/MikalDev/gltf-static",
+	"description": "Load and render static glTF 3D models in Construct 3.",
+	"editor-scripts": [
+		"plugin.js",
+		"type.js",
+		"instance.js"
+	],
+	"file-list": [
+		"c3runtime/main.js",
+		"c3runtime/plugin.js",
+		"c3runtime/type.js",
+		"c3runtime/instance.js",
+		"c3runtime/conditions.js",
+		"c3runtime/actions.js",
+		"c3runtime/expressions.js",
+		"lang/en-US.json",
+		"aces.json",
+		"addon.json",
+		"icon.svg",
+		"plugin.js",
+		"type.js",
+		"instance.js"
+	]
+}

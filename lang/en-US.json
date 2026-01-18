@@ -1,0 +1,97 @@
+{
+	"languageTag": "en-US",
+	"fileDescription": "Strings for glTF Static plugin.",
+	"text": {
+		"plugins": {
+			"gltfstatic": {
+				"name": "glTF Static",
+				"description": "Load and render static glTF 3D models.",
+				"help-url": "https://github.com/MikalDev/gltf-static",
+				"properties": {
+					"edit-image": {
+						"name": "Image",
+						"desc": "Click to edit the object's placeholder image.",
+						"link-text": "Edit"
+					},
+					"make-original-size": {
+						"name": "Size",
+						"desc": "Click to set the object to the same size as its image.",
+						"link-text": "Make 1:1"
+					},
+					"model-url": {
+						"name": "Model URL",
+						"desc": "URL to the glTF model file (.gltf or .glb)."
+					},
+					"rotation-x": {
+						"name": "Rotation X",
+						"desc": "Initial X rotation of the model in degrees."
+					},
+					"rotation-y": {
+						"name": "Rotation Y",
+						"desc": "Initial Y rotation of the model in degrees."
+					},
+					"rotation-z": {
+						"name": "Rotation Z",
+						"desc": "Initial Z rotation of the model in degrees."
+					}
+				},
+				"aceCategories": {
+					"gltf": "glTF"
+				},
+				"conditions": {
+					"is-loaded": {
+						"list-name": "Is loaded",
+						"display-text": "{my} model is loaded",
+						"description": "True if the glTF model has finished loading."
+					}
+				},
+				"actions": {
+					"load-model": {
+						"list-name": "Load model",
+						"display-text": "{my} load model from [b]{0}[/b]",
+						"description": "Load a glTF model from a URL.",
+						"params": {
+							"url": {
+								"name": "URL",
+								"desc": "The URL to load the glTF model from."
+							}
+						}
+					},
+					"set-rotation": {
+						"list-name": "Set rotation",
+						"display-text": "{my} set rotation to ([b]{0}[/b], [b]{1}[/b], [b]{2}[/b])",
+						"description": "Set the rotation of the model.",
+						"params": {
+							"x": {
+								"name": "X",
+								"desc": "X rotation in degrees."
+							},
+							"y": {
+								"name": "Y",
+								"desc": "Y rotation in degrees."
+							},
+							"z": {
+								"name": "Z",
+								"desc": "Z rotation in degrees."
+							}
+						}
+					}
+				},
+				"expressions": {
+					"rotation-x": {
+						"description": "Get the current X rotation.",
+						"translated-name": "RotationX"
+					},
+					"rotation-y": {
+						"description": "Get the current Y rotation.",
+						"translated-name": "RotationY"
+					},
+					"rotation-z": {
+						"description": "Get the current Z rotation.",
+						"translated-name": "RotationZ"
+					}
+				}
+			}
+		}
+	}
+}
