@@ -72,13 +72,11 @@ export class GltfMesh {
     }
     /**
      * Draw this mesh with its texture.
+     * Note: Cull mode is set at model level for performance.
      */
     draw(renderer) {
         if (!this._meshData)
             return;
-        // Enable backface culling for better performance on closed meshes
-        const prevCullMode = renderer.getCullFaceMode();
-        renderer.setCullFaceMode("back");
         if (this._texture) {
             // Textured rendering
             renderer.setTextureFillMode();
@@ -90,8 +88,6 @@ export class GltfMesh {
         }
         renderer.resetColor();
         renderer.drawMeshData(this._meshData);
-        // Restore previous cull mode
-        renderer.setCullFaceMode(prevCullMode);
     }
     /**
      * Release GPU resources.

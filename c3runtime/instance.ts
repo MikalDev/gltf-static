@@ -47,7 +47,6 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_lastX: number = NaN;
 	_lastY: number = NaN;
 	_lastWidth: number = NaN;
-	_lastHeight: number = NaN;
 	_lastAngle: number = NaN;
 	_lastZElevation: number = NaN;
 	_lastRotationX: number = NaN;
@@ -115,7 +114,6 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			this._lastX !== this.x ||
 			this._lastY !== this.y ||
 			this._lastWidth !== this.width ||
-			this._lastHeight !== this.height ||
 			this._lastAngle !== this.angle ||
 			this._lastZElevation !== this.zElevation ||
 			this._lastRotationX !== this._rotationX ||
@@ -167,7 +165,6 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		this._lastX = this.x;
 		this._lastY = this.y;
 		this._lastWidth = this.width;
-		this._lastHeight = this.height;
 		this._lastAngle = this.angle;
 		this._lastZElevation = this.zElevation;
 		this._lastRotationX = this._rotationX;

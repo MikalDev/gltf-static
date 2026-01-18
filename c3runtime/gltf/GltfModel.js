@@ -1,7 +1,6 @@
 import { WebIO } from "@gltf-transform/core";
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
-import { GltfNode } from "./GltfNode.js";
 // Debug logging - set to false to disable
 const DEBUG = true;
 const LOG_PREFIX = "[GltfModel]";
@@ -17,17 +16,17 @@ function debugWarn(...args) {
 const GLTF_TRIANGLES = 4;
 /**
  * Loads and manages a complete glTF model.
- * Owns all textures and nodes (responsible for cleanup).
+ * Owns all textures and meshes (responsible for cleanup).
+ * Node hierarchy is flattened - transforms baked into mesh positions at load time.
  */
 export class GltfModel {
     constructor() {
         this._textures = [];
-        this._nodes = [];
+        this._meshes = [];
         this._isLoaded = false;
         // Stats tracking
         this._totalVertices = 0;
         this._totalIndices = 0;
-        this._meshCount = 0;
     }
     get isLoaded() {
         return this._isLoaded;
@@ -37,8 +36,8 @@ export class GltfModel {
      */
     getStats() {
         return {
-            nodeCount: this._nodes.length,
-            meshCount: this._meshCount,
+            nodeCount: 0, // Flattened - no node hierarchy stored
+            meshCount: this._meshes.length,
             textureCount: this._textures.length,
             totalVertices: this._totalVertices,
             totalIndices: this._totalIndices
@@ -52,11 +51,10 @@ export class GltfModel {
         const loadStart = performance.now();
         // Track resources for cleanup on error
         const loadedTextures = [];
-        const loadedNodes = [];
+        const loadedMeshes = [];
         // Reset stats
         this._totalVertices = 0;
         this._totalIndices = 0;
-        this._meshCount = 0;
         try {
             debugLog("Fetching and parsing glTF document...");
             const fetchStart = performance.now();
@@ -69,7 +67,7 @@ export class GltfModel {
             const textureStart = performance.now();
             const textureMap = await this._loadTextures(renderer, root, loadedTextures);
             debugLog(`${loadedTextures.length} textures loaded in ${(performance.now() - textureStart).toFixed(0)}ms`);
-            // 2. Process nodes with meshes
+            // 2. Process nodes with meshes (flattened into mesh array)
             debugLog("Processing nodes and meshes...");
             const meshStart = performance.now();
             const identityMatrix = mat4.create();
@@ -79,17 +77,16 @@ export class GltfModel {
                 const children = scene.listChildren();
                 debugLog(`Scene has ${children.length} root node(s)`);
                 for (const node of children) {
-                    this._processNode(renderer, node, textureMap, identityMatrix, loadedNodes);
+                    this._processNode(renderer, node, textureMap, identityMatrix, loadedMeshes);
                 }
             }
             debugLog(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
             // Success - store resources
             this._textures = loadedTextures;
-            this._nodes = loadedNodes;
+            this._meshes = loadedMeshes;
             this._isLoaded = true;
             debugLog(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
-                nodes: this._nodes.length,
-                meshes: this._meshCount,
+                meshes: this._meshes.length,
                 textures: this._textures.length,
                 vertices: this._totalVertices,
                 indices: this._totalIndices
@@ -98,8 +95,8 @@ export class GltfModel {
         catch (err) {
             debugWarn("Load failed, cleaning up partial resources...");
             // Cleanup any partially loaded resources
-            for (const node of loadedNodes) {
-                node.release();
+            for (const mesh of loadedMeshes) {
+                mesh.release();
             }
             for (const texture of loadedTextures) {
                 renderer.deleteTexture(texture);
@@ -143,9 +140,9 @@ export class GltfModel {
         return map;
     }
     /**
-     * Process a glTF node recursively, creating GltfNode with meshes.
+     * Process a glTF node recursively, adding meshes to flat array.
      */
-    _processNode(renderer, nodeDef, textureMap, parentMatrix, loadedNodes, depth = 0) {
+    _processNode(renderer, nodeDef, textureMap, parentMatrix, loadedMeshes, depth = 0) {
         const nodeName = nodeDef.getName() || "(unnamed)";
         const indent = "  ".repeat(depth);
         debugLog(`${indent}Processing node: "${nodeName}"`);
@@ -155,7 +152,6 @@ export class GltfModel {
         mat4.multiply(worldMatrix, parentMatrix, localMatrix);
         const mesh = nodeDef.getMesh();
         if (mesh) {
-            const node = new GltfNode();
             const primitives = mesh.listPrimitives();
             debugLog(`${indent}  Mesh has ${primitives.length} primitive(s)`);
             for (const primitive of primitives) {
@@ -167,13 +163,8 @@ export class GltfModel {
                 }
                 const gltfMesh = this._createMesh(renderer, primitive, worldMatrix, textureMap);
                 if (gltfMesh) {
-                    node.addMesh(gltfMesh);
-                    this._meshCount++;
+                    loadedMeshes.push(gltfMesh);
                 }
-            }
-            // Only add node if it has meshes
-            if (node.hasMeshes()) {
-                loadedNodes.push(node);
             }
         }
         // Recurse children with accumulated transform
@@ -182,7 +173,7 @@ export class GltfModel {
             debugLog(`${indent}  ${children.length} child node(s)`);
         }
         for (const child of children) {
-            this._processNode(renderer, child, textureMap, worldMatrix, loadedNodes, depth + 1);
+            this._processNode(renderer, child, textureMap, worldMatrix, loadedMeshes, depth + 1);
         }
     }
     /**
@@ -295,27 +286,32 @@ export class GltfModel {
      * Update all mesh transforms with a new instance transform matrix.
      */
     updateTransform(matrix) {
-        for (const node of this._nodes) {
-            node.updateTransform(matrix);
+        for (const mesh of this._meshes) {
+            mesh.updateTransform(matrix);
         }
     }
     /**
-     * Draw all nodes.
+     * Draw all meshes.
      */
     draw(renderer) {
-        for (const node of this._nodes) {
-            node.draw(renderer);
+        // Set cull mode once for all meshes (performance optimization)
+        const prevCullMode = renderer.getCullFaceMode();
+        renderer.setCullFaceMode("back");
+        for (const mesh of this._meshes) {
+            mesh.draw(renderer);
         }
+        // Restore previous cull mode
+        renderer.setCullFaceMode(prevCullMode);
     }
     /**
      * Release all resources.
      */
     release(renderer) {
-        // Release nodes (which release meshes)
-        for (const node of this._nodes) {
-            node.release();
+        // Release all meshes
+        for (const mesh of this._meshes) {
+            mesh.release();
         }
-        this._nodes = [];
+        this._meshes = [];
         // Release owned textures
         for (const texture of this._textures) {
             renderer.deleteTexture(texture);
