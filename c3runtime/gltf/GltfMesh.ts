@@ -1,5 +1,13 @@
 import { vec3, mat4 } from "gl-matrix";
 
+// Debug logging - set to false to disable
+const DEBUG = true;
+const LOG_PREFIX = "[GltfMesh]";
+
+function debugLog(...args: unknown[]): void {
+	if (DEBUG) console.log(LOG_PREFIX, ...args);
+}
+
 /**
  * Represents a single mesh primitive with GPU-uploaded data.
  * Does NOT own texture - just holds reference (Model owns textures).
@@ -12,8 +20,16 @@ export class GltfMesh {
 	private _originalPositions: Float32Array | null = null;
 	private _vertexCount: number = 0;
 
+	// Debug: track mesh ID for logging
+	private static _nextId: number = 0;
+	private _id: number;
+
 	// Reusable temp vector (avoid allocations in hot path)
 	private static _tempVec: vec3 = vec3.create();
+
+	constructor() {
+		this._id = GltfMesh._nextId++;
+	}
 
 	/**
 	 * Create GPU buffers and upload mesh data.
@@ -28,6 +44,8 @@ export class GltfMesh {
 	): void {
 		this._vertexCount = positions.length / 3;
 		const indexCount = indices.length;
+
+		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"})`);
 
 		// Store original positions for transform updates
 		this._originalPositions = new Float32Array(positions);
@@ -111,6 +129,7 @@ export class GltfMesh {
 	 * Release GPU resources.
 	 */
 	release(): void {
+		debugLog(`Mesh #${this._id}: Releasing GPU resources`);
 		if (this._meshData) {
 			this._meshData.release();
 			this._meshData = null;

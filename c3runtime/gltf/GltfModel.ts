@@ -3,8 +3,29 @@ import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
 import { GltfNode } from "./GltfNode.js";
 
+// Debug logging - set to false to disable
+const DEBUG = true;
+const LOG_PREFIX = "[GltfModel]";
+
+function debugLog(...args: unknown[]): void {
+	if (DEBUG) console.log(LOG_PREFIX, ...args);
+}
+
+function debugWarn(...args: unknown[]): void {
+	if (DEBUG) console.warn(LOG_PREFIX, ...args);
+}
+
 // glTF primitive modes
 const GLTF_TRIANGLES = 4;
+
+/** Stats about a loaded model */
+export interface GltfModelStats {
+	nodeCount: number;
+	meshCount: number;
+	textureCount: number;
+	totalVertices: number;
+	totalIndices: number;
+}
 
 /**
  * Loads and manages a complete glTF model.
@@ -15,39 +36,88 @@ export class GltfModel {
 	private _nodes: GltfNode[] = [];
 	private _isLoaded: boolean = false;
 
+	// Stats tracking
+	private _totalVertices: number = 0;
+	private _totalIndices: number = 0;
+	private _meshCount: number = 0;
+
 	get isLoaded(): boolean {
 		return this._isLoaded;
+	}
+
+	/**
+	 * Get statistics about the loaded model.
+	 */
+	getStats(): GltfModelStats {
+		return {
+			nodeCount: this._nodes.length,
+			meshCount: this._meshCount,
+			textureCount: this._textures.length,
+			totalVertices: this._totalVertices,
+			totalIndices: this._totalIndices
+		};
 	}
 
 	/**
 	 * Load model from URL.
 	 */
 	async load(renderer: IRenderer, url: string): Promise<void> {
+		debugLog("Loading glTF from:", url);
+		const loadStart = performance.now();
+
 		// Track resources for cleanup on error
 		const loadedTextures: ITexture[] = [];
 		const loadedNodes: GltfNode[] = [];
 
+		// Reset stats
+		this._totalVertices = 0;
+		this._totalIndices = 0;
+		this._meshCount = 0;
+
 		try {
+			debugLog("Fetching and parsing glTF document...");
+			const fetchStart = performance.now();
 			const io = new WebIO();
 			const document = await io.read(url);
 			const root = document.getRoot();
+			debugLog(`Document parsed in ${(performance.now() - fetchStart).toFixed(0)}ms`);
 
 			// 1. Load all textures first
+			debugLog("Loading textures...");
+			const textureStart = performance.now();
 			const textureMap = await this._loadTextures(renderer, root, loadedTextures);
+			debugLog(`${loadedTextures.length} textures loaded in ${(performance.now() - textureStart).toFixed(0)}ms`);
 
 			// 2. Process nodes with meshes
+			debugLog("Processing nodes and meshes...");
+			const meshStart = performance.now();
 			const identityMatrix = mat4.create();
-			for (const scene of root.listScenes()) {
-				for (const node of scene.listChildren()) {
+			const sceneList = root.listScenes();
+			debugLog(`Found ${sceneList.length} scene(s)`);
+
+			for (const scene of sceneList) {
+				const children = scene.listChildren();
+				debugLog(`Scene has ${children.length} root node(s)`);
+				for (const node of children) {
 					this._processNode(renderer, node, textureMap, identityMatrix, loadedNodes);
 				}
 			}
+			debugLog(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
 
 			// Success - store resources
 			this._textures = loadedTextures;
 			this._nodes = loadedNodes;
 			this._isLoaded = true;
+
+			debugLog(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
+				nodes: this._nodes.length,
+				meshes: this._meshCount,
+				textures: this._textures.length,
+				vertices: this._totalVertices,
+				indices: this._totalIndices
+			});
 		} catch (err) {
+			debugWarn("Load failed, cleaning up partial resources...");
 			// Cleanup any partially loaded resources
 			for (const node of loadedNodes) {
 				node.release();
@@ -68,13 +138,18 @@ export class GltfModel {
 		loadedTextures: ITexture[]
 	): Promise<Map<Texture, ITexture>> {
 		const map = new Map<Texture, ITexture>();
+		const textureList = root.listTextures();
+		debugLog(`Found ${textureList.length} texture(s) in document`);
 
-		for (const texture of root.listTextures()) {
+		let textureIndex = 0;
+		for (const texture of textureList) {
 			const imageData = texture.getImage();
 			if (imageData) {
 				const mimeType = texture.getMimeType() || "image/png";
 				const blob = new Blob([imageData], { type: mimeType });
 				const bitmap = await createImageBitmap(blob);
+
+				debugLog(`Texture ${textureIndex}: ${bitmap.width}x${bitmap.height} (${mimeType}, ${imageData.byteLength} bytes)`);
 
 				try {
 					const c3Texture = await renderer.createStaticTexture(bitmap, {
@@ -88,7 +163,10 @@ export class GltfModel {
 					// Always close bitmap to free memory
 					bitmap.close();
 				}
+			} else {
+				debugWarn(`Texture ${textureIndex}: No image data`);
 			}
+			textureIndex++;
 		}
 
 		return map;
@@ -102,8 +180,13 @@ export class GltfModel {
 		nodeDef: GltfNodeDef,
 		textureMap: Map<Texture, ITexture>,
 		parentMatrix: mat4,
-		loadedNodes: GltfNode[]
+		loadedNodes: GltfNode[],
+		depth: number = 0
 	): void {
+		const nodeName = nodeDef.getName() || "(unnamed)";
+		const indent = "  ".repeat(depth);
+		debugLog(`${indent}Processing node: "${nodeName}"`);
+
 		// Compute world matrix for this node
 		const localMatrix = this._getLocalMatrix(nodeDef);
 		const worldMatrix = mat4.create();
@@ -113,12 +196,14 @@ export class GltfModel {
 
 		if (mesh) {
 			const node = new GltfNode();
+			const primitives = mesh.listPrimitives();
+			debugLog(`${indent}  Mesh has ${primitives.length} primitive(s)`);
 
-			for (const primitive of mesh.listPrimitives()) {
+			for (const primitive of primitives) {
 				// Only process triangle primitives (mode 4 or undefined which defaults to triangles)
 				const mode = primitive.getMode();
 				if (mode !== GLTF_TRIANGLES && mode !== undefined) {
-					console.warn(`[GltfStatic] Skipping non-triangle primitive (mode: ${mode})`);
+					debugWarn(`${indent}  Skipping non-triangle primitive (mode: ${mode})`);
 					continue;
 				}
 
@@ -130,6 +215,7 @@ export class GltfModel {
 				);
 				if (gltfMesh) {
 					node.addMesh(gltfMesh);
+					this._meshCount++;
 				}
 			}
 
@@ -140,8 +226,12 @@ export class GltfModel {
 		}
 
 		// Recurse children with accumulated transform
-		for (const child of nodeDef.listChildren()) {
-			this._processNode(renderer, child, textureMap, worldMatrix, loadedNodes);
+		const children = nodeDef.listChildren();
+		if (children.length > 0) {
+			debugLog(`${indent}  ${children.length} child node(s)`);
+		}
+		for (const child of children) {
+			this._processNode(renderer, child, textureMap, worldMatrix, loadedNodes, depth + 1);
 		}
 	}
 
@@ -160,6 +250,7 @@ export class GltfModel {
 		const indicesAccessor = primitive.getIndices();
 
 		if (!posAccessor || !indicesAccessor) {
+			debugWarn("Primitive missing POSITION or indices, skipping");
 			return null;
 		}
 
@@ -167,6 +258,7 @@ export class GltfModel {
 		const indicesArray = indicesAccessor.getArray();
 
 		if (!posArray || !indicesArray) {
+			debugWarn("Primitive has null array data, skipping");
 			return null;
 		}
 
@@ -195,6 +287,16 @@ export class GltfModel {
 			indices = new Uint16Array(indicesArray);
 		}
 
+		const vertexCount = positions.length / 3;
+		const indexCount = indices.length;
+		const triangleCount = indexCount / 3;
+
+		// Track stats
+		this._totalVertices += vertexCount;
+		this._totalIndices += indexCount;
+
+		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}`);
+
 		// Apply world transform to positions (bake transform)
 		positions = this._transformPositions(positions, worldMatrix);
 
@@ -205,6 +307,11 @@ export class GltfModel {
 			const baseColorTex = material.getBaseColorTexture();
 			if (baseColorTex) {
 				texture = textureMap.get(baseColorTex) || null;
+				if (texture) {
+					debugLog(`    Texture assigned from material`);
+				} else {
+					debugWarn(`    Material has texture but not found in map`);
+				}
 			}
 		}
 

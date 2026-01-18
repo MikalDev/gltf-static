@@ -1,4 +1,5 @@
 export { GltfModel } from "./GltfModel.js";
+export type { GltfModelStats } from "./GltfModel.js";
 export { GltfNode } from "./GltfNode.js";
 export { GltfMesh } from "./GltfMesh.js";
 

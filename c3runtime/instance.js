@@ -1,4 +1,19 @@
 import { GltfModel, mat4, vec3 } from "./gltf-bundle.js";
+// Debug logging - set to false to disable
+const DEBUG = true;
+const LOG_PREFIX = "[GltfStatic]";
+function debugLog(...args) {
+    if (DEBUG)
+        console.log(LOG_PREFIX, ...args);
+}
+function debugWarn(...args) {
+    if (DEBUG)
+        console.warn(LOG_PREFIX, ...args);
+}
+function debugError(...args) {
+    // Always log errors, but add prefix only in debug mode
+    console.error(LOG_PREFIX, ...args);
+}
 // Property indices (matching order in plugin.ts)
 const PROP_MODEL_URL = 2;
 const PROP_ROTATION_X = 3;
@@ -30,8 +45,13 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._lastRotationX = NaN;
         this._lastRotationY = NaN;
         this._lastRotationZ = NaN;
+        // Debug stats
+        this._drawCount = 0;
+        this._lastDrawTime = 0;
+        debugLog("Instance created");
     }
     _onCreate() {
+        debugLog("_onCreate called");
         // Initialize from properties array
         const props = this._getInitProperties();
         if (props) {
@@ -39,17 +59,26 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
             this._rotationX = props[PROP_ROTATION_X];
             this._rotationY = props[PROP_ROTATION_Y];
             this._rotationZ = props[PROP_ROTATION_Z];
+            debugLog("Properties loaded:", {
+                modelUrl: this._modelUrl,
+                rotationX: this._rotationX,
+                rotationY: this._rotationY,
+                rotationZ: this._rotationZ
+            });
             // Auto-load model if URL is set
             if (this._modelUrl) {
+                debugLog("Auto-loading model from URL:", this._modelUrl);
                 this._loadModel(this._modelUrl);
             }
         }
     }
     _release() {
+        debugLog("_release called, total draws:", this._drawCount);
         // Clean up glTF model resources
         if (this._model) {
             this._model.release(this.runtime.renderer);
             this._model = null;
+            debugLog("Model resources released");
         }
     }
     /**
@@ -108,17 +137,39 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         return tempMatrix;
     }
     _draw(renderer) {
+        const drawStart = performance.now();
+        this._drawCount++;
+        // Log first draw and every 60 frames (roughly every second at 60fps)
+        const shouldLog = this._drawCount === 1 || this._drawCount % 60 === 0;
         // Draw the glTF model if loaded
         if (this._model?.isLoaded) {
             // Update mesh positions if transform changed
             if (this._isTransformDirty()) {
+                if (shouldLog)
+                    debugLog("Transform dirty, rebuilding matrix");
                 const matrix = this._buildTransformMatrix();
                 this._model.updateTransform(matrix);
             }
             // Draw the model
             this._model.draw(renderer);
+            const drawTime = performance.now() - drawStart;
+            this._lastDrawTime = drawTime;
+            if (shouldLog) {
+                debugLog(`Draw #${this._drawCount}:`, {
+                    drawTimeMs: drawTime.toFixed(2),
+                    position: { x: this.x, y: this.y, z: this.totalZElevation },
+                    size: { width: this.width, height: this.height },
+                    rotation: { x: this._rotationX, y: this._rotationY, z: this._rotationZ, angle: this.angle }
+                });
+            }
         }
         else {
+            if (shouldLog) {
+                debugLog(`Draw #${this._drawCount}: Model not loaded, drawing placeholder`, {
+                    isLoading: this._isLoading,
+                    hasModel: !!this._model
+                });
+            }
             // Fallback: draw placeholder texture while model is loading
             const imageInfo = this.objectType.getImageInfo();
             const texture = imageInfo.getTexture(renderer);
@@ -162,12 +213,17 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
     }
     async _loadModel(url) {
         // Prevent concurrent loads
-        if (this._isLoading)
+        if (this._isLoading) {
+            debugWarn("Load already in progress, ignoring request for:", url);
             return;
+        }
+        debugLog("Starting model load:", url);
+        const loadStart = performance.now();
         this._modelUrl = url;
         this._isLoading = true;
         // Release existing model
         if (this._model) {
+            debugLog("Releasing previous model");
             this._model.release(this.runtime.renderer);
             this._model = null;
         }
@@ -176,11 +232,18 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         try {
             this._model = new GltfModel();
             await this._model.load(this.runtime.renderer, url);
+            const loadTime = performance.now() - loadStart;
+            const stats = this._model.getStats();
+            debugLog(`Model loaded successfully in ${loadTime.toFixed(0)}ms:`, {
+                url,
+                ...stats
+            });
             // Trigger "On Loaded" condition
             this._trigger(C3.Plugins.GltfStatic.Cnds.OnLoaded);
         }
         catch (err) {
-            console.error("[GltfStatic] Failed to load model:", err);
+            const loadTime = performance.now() - loadStart;
+            debugError(`Failed to load model after ${loadTime.toFixed(0)}ms:`, url, err);
             this._model = null;
             // Trigger "On Load Error" condition
             this._trigger(C3.Plugins.GltfStatic.Cnds.OnLoadError);
