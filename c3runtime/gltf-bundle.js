@@ -7523,17 +7523,17 @@ var setAxes = (function() {
   };
 })();
 
-// c3runtime/gltf/GltfMesh.js
+// c3runtime/gltf/GltfMesh.ts
 var DEBUG = true;
 var LOG_PREFIX = "[GltfMesh]";
 function debugLog(...args) {
-  if (DEBUG)
-    console.log(LOG_PREFIX, ...args);
+  if (DEBUG) console.log(LOG_PREFIX, ...args);
 }
-var GltfMesh = class _GltfMesh {
+var _GltfMesh = class _GltfMesh {
   constructor() {
     this._meshData = null;
     this._texture = null;
+    // Store original positions for runtime transform updates
     this._originalPositions = null;
     this._vertexCount = 0;
     this._id = _GltfMesh._nextId++;
@@ -7545,12 +7545,18 @@ var GltfMesh = class _GltfMesh {
   create(renderer, positions, texCoords, indices, texture) {
     this._vertexCount = positions.length / 3;
     const indexCount = indices.length;
+    const expectedTexCoordLength = this._vertexCount * 2;
     debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"})`);
+    debugLog(`Mesh #${this._id}: positions.length=${positions.length}, texCoords.length=${texCoords?.length}, expected texCoords=${expectedTexCoordLength}`);
     this._originalPositions = new Float32Array(positions);
     this._meshData = renderer.createMeshData(this._vertexCount, indexCount);
     this._meshData.positions.set(positions);
     this._meshData.markDataChanged("positions", 0, this._vertexCount);
     if (texCoords) {
+      debugLog(`Mesh #${this._id}: meshData.texCoords.length=${this._meshData.texCoords.length}`);
+      if (texCoords.length !== this._meshData.texCoords.length) {
+        debugLog(`Mesh #${this._id}: WARNING - texCoords length mismatch! source=${texCoords.length}, target=${this._meshData.texCoords.length}`);
+      }
       this._meshData.texCoords.set(texCoords);
     } else {
       this._meshData.texCoords.fill(0);
@@ -7567,8 +7573,7 @@ var GltfMesh = class _GltfMesh {
    * Uses gl-matrix for efficient transformation.
    */
   updateTransform(matrix) {
-    if (!this._meshData || !this._originalPositions)
-      return;
+    if (!this._meshData || !this._originalPositions) return;
     const positions = this._meshData.positions;
     const original = this._originalPositions;
     const tempVec = _GltfMesh._tempVec;
@@ -7587,8 +7592,7 @@ var GltfMesh = class _GltfMesh {
    * Note: Cull mode is set at model level for performance.
    */
   draw(renderer) {
-    if (!this._meshData)
-      return;
+    if (!this._meshData) return;
     if (this._texture) {
       renderer.setTextureFillMode();
       renderer.setTexture(this._texture);
@@ -7612,19 +7616,20 @@ var GltfMesh = class _GltfMesh {
     this._vertexCount = 0;
   }
 };
-GltfMesh._nextId = 0;
-GltfMesh._tempVec = vec3_exports.create();
+// Debug: track mesh ID for logging
+_GltfMesh._nextId = 0;
+// Reusable temp vector (avoid allocations in hot path)
+_GltfMesh._tempVec = vec3_exports.create();
+var GltfMesh = _GltfMesh;
 
-// c3runtime/gltf/GltfModel.js
+// c3runtime/gltf/GltfModel.ts
 var DEBUG2 = true;
 var LOG_PREFIX2 = "[GltfModel]";
 function debugLog2(...args) {
-  if (DEBUG2)
-    console.log(LOG_PREFIX2, ...args);
+  if (DEBUG2) console.log(LOG_PREFIX2, ...args);
 }
 function debugWarn(...args) {
-  if (DEBUG2)
-    console.warn(LOG_PREFIX2, ...args);
+  if (DEBUG2) console.warn(LOG_PREFIX2, ...args);
 }
 var GLTF_TRIANGLES = 4;
 var GltfModel = class {
@@ -7632,6 +7637,7 @@ var GltfModel = class {
     this._textures = [];
     this._meshes = [];
     this._isLoaded = false;
+    // Stats tracking
     this._totalVertices = 0;
     this._totalIndices = 0;
   }
@@ -7723,7 +7729,9 @@ var GltfModel = class {
         try {
           const c3Texture = await renderer.createStaticTexture(bitmap, {
             sampling: "bilinear",
-            mipMap: true
+            mipMap: true,
+            wrapX: "repeat",
+            wrapY: "repeat"
           });
           loadedTextures.push(c3Texture);
           map.set(texture, c3Texture);
@@ -7757,7 +7765,12 @@ var GltfModel = class {
           debugWarn(`${indent}  Skipping non-triangle primitive (mode: ${mode})`);
           continue;
         }
-        const gltfMesh = this._createMesh(renderer, primitive, worldMatrix, textureMap);
+        const gltfMesh = this._createMesh(
+          renderer,
+          primitive,
+          worldMatrix,
+          textureMap
+        );
         if (gltfMesh) {
           loadedMeshes.push(gltfMesh);
         }
@@ -7797,7 +7810,15 @@ var GltfModel = class {
     const uvArray = uvAccessor?.getArray();
     let texCoords = null;
     if (uvArray) {
-      texCoords = uvArray instanceof Float32Array ? uvArray : new Float32Array(uvArray);
+      texCoords = new Float32Array(uvArray);
+      let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      for (let i = 0; i < texCoords.length; i += 2) {
+        minU = Math.min(minU, texCoords[i]);
+        maxU = Math.max(maxU, texCoords[i]);
+        minV = Math.min(minV, texCoords[i + 1]);
+        maxV = Math.max(maxV, texCoords[i + 1]);
+      }
+      debugLog2(`    UV range: U[${minU.toFixed(2)}-${maxU.toFixed(2)}], V[${minV.toFixed(2)}-${maxV.toFixed(2)}]`);
     }
     let indices;
     if (indicesArray instanceof Uint16Array || indicesArray instanceof Uint32Array) {
@@ -7837,13 +7858,35 @@ var GltfModel = class {
   _getLocalMatrix(node) {
     const nodeMatrix = node.getMatrix();
     if (nodeMatrix) {
-      return mat4_exports.fromValues(nodeMatrix[0], nodeMatrix[1], nodeMatrix[2], nodeMatrix[3], nodeMatrix[4], nodeMatrix[5], nodeMatrix[6], nodeMatrix[7], nodeMatrix[8], nodeMatrix[9], nodeMatrix[10], nodeMatrix[11], nodeMatrix[12], nodeMatrix[13], nodeMatrix[14], nodeMatrix[15]);
+      return mat4_exports.fromValues(
+        nodeMatrix[0],
+        nodeMatrix[1],
+        nodeMatrix[2],
+        nodeMatrix[3],
+        nodeMatrix[4],
+        nodeMatrix[5],
+        nodeMatrix[6],
+        nodeMatrix[7],
+        nodeMatrix[8],
+        nodeMatrix[9],
+        nodeMatrix[10],
+        nodeMatrix[11],
+        nodeMatrix[12],
+        nodeMatrix[13],
+        nodeMatrix[14],
+        nodeMatrix[15]
+      );
     }
     const t = node.getTranslation();
     const r = node.getRotation();
     const s = node.getScale();
     const result = mat4_exports.create();
-    mat4_exports.fromRotationTranslationScale(result, quat_exports.fromValues(r[0], r[1], r[2], r[3]), vec3_exports.fromValues(t[0], t[1], t[2]), vec3_exports.fromValues(s[0], s[1], s[2]));
+    mat4_exports.fromRotationTranslationScale(
+      result,
+      quat_exports.fromValues(r[0], r[1], r[2], r[3]),
+      vec3_exports.fromValues(t[0], t[1], t[2]),
+      vec3_exports.fromValues(s[0], s[1], s[2])
+    );
     return result;
   }
   /**
@@ -7896,6 +7939,9 @@ var GltfModel = class {
     this._isLoaded = false;
   }
 };
+
+// c3runtime/gltf/index.ts
+globalThis.GltfBundle = { GltfModel, GltfMesh, mat4: mat4_exports, vec3: vec3_exports, quat: quat_exports };
 export {
   GltfMesh,
   GltfModel,

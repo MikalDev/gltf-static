@@ -1,5 +1,18 @@
-import { GltfModel, mat4, vec3 } from "./gltf-bundle.js";
-import type { mat4 as Mat4Type, vec3 as Vec3Type } from "gl-matrix";
+// Import types only (not runtime values) for TypeScript checking
+import type { GltfModel as GltfModelType } from "./gltf/GltfModel.js";
+import type { mat4 as mat4Type, vec3 as vec3Type } from "gl-matrix";
+
+// Augment globalThis with GltfBundle type
+declare global {
+	var GltfBundle: {
+		GltfModel: typeof GltfModelType;
+		mat4: typeof mat4Type;
+		vec3: typeof vec3Type;
+	};
+}
+
+// Access bundle from globalThis (C3 worker compatible - no ES module import)
+const { GltfModel, mat4, vec3 } = globalThis.GltfBundle;
 
 // Debug logging - set to false to disable
 const DEBUG = true;
@@ -18,15 +31,16 @@ function debugError(...args: unknown[]): void {
 	console.error(LOG_PREFIX, ...args);
 }
 
-// Property indices (matching order in plugin.ts)
-const PROP_MODEL_URL = 2;
-const PROP_ROTATION_X = 3;
-const PROP_ROTATION_Y = 4;
-const PROP_ROTATION_Z = 5;
+// Property indices (link properties are excluded from _getInitProperties)
+// Only data properties are included: model-url, rotation-x, rotation-y, rotation-z
+const PROP_MODEL_URL = 0;
+const PROP_ROTATION_X = 1;
+const PROP_ROTATION_Y = 2;
+const PROP_ROTATION_Z = 3;
 
 // Reusable matrix/vectors for transform calculations (avoid per-frame allocations)
-const tempMatrix: Mat4Type = mat4.create();
-const tempVec: Vec3Type = vec3.create();
+const tempMatrix = mat4.create();
+const tempVec = vec3.create();
 
 // Degrees to radians conversion factor
 const DEG_TO_RAD = Math.PI / 180;
@@ -40,7 +54,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_rotationZ: number = 0;
 
 	// glTF model
-	_model: GltfModel | null = null;
+	_model: GltfModelType | null = null;
 	_isLoading: boolean = false;
 
 	// Transform tracking for dirty checks
@@ -61,13 +75,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	{
 		super();
 		debugLog("Instance created");
-	}
 
-	_onCreate(): void
-	{
-		debugLog("_onCreate called");
-
-		// Initialize from properties array
+		// SDK v2: Initialize from properties in constructor
 		const props = this._getInitProperties();
 		if (props)
 		{

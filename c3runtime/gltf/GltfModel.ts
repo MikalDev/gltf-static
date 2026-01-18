@@ -151,7 +151,9 @@ export class GltfModel {
 				try {
 					const c3Texture = await renderer.createStaticTexture(bitmap, {
 						sampling: "bilinear",
-						mipMap: true
+						mipMap: true,
+						wrapX: "repeat",
+						wrapY: "repeat"
 					});
 
 					loadedTextures.push(c3Texture);
@@ -264,7 +266,17 @@ export class GltfModel {
 		const uvArray = uvAccessor?.getArray();
 		let texCoords: Float32Array | null = null;
 		if (uvArray) {
-			texCoords = uvArray instanceof Float32Array ? uvArray : new Float32Array(uvArray);
+			texCoords = new Float32Array(uvArray);
+
+			// Debug: log UV range
+			let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+			for (let i = 0; i < texCoords.length; i += 2) {
+				minU = Math.min(minU, texCoords[i]);
+				maxU = Math.max(maxU, texCoords[i]);
+				minV = Math.min(minV, texCoords[i + 1]);
+				maxV = Math.max(maxV, texCoords[i + 1]);
+			}
+			debugLog(`    UV range: U[${minU.toFixed(2)}-${maxU.toFixed(2)}], V[${minV.toFixed(2)}-${maxV.toFixed(2)}]`);
 		}
 
 		// Get indices - convert to appropriate type

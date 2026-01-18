@@ -44,8 +44,10 @@ export class GltfMesh {
 	): void {
 		this._vertexCount = positions.length / 3;
 		const indexCount = indices.length;
+		const expectedTexCoordLength = this._vertexCount * 2;
 
 		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"})`);
+		debugLog(`Mesh #${this._id}: positions.length=${positions.length}, texCoords.length=${texCoords?.length}, expected texCoords=${expectedTexCoordLength}`);
 
 		// Store original positions for transform updates
 		this._originalPositions = new Float32Array(positions);
@@ -58,6 +60,11 @@ export class GltfMesh {
 
 		// Upload UVs (u, v per vertex) - default to 0,0 if not present
 		if (texCoords) {
+			debugLog(`Mesh #${this._id}: meshData.texCoords.length=${this._meshData.texCoords.length}`);
+			// Verify lengths match
+			if (texCoords.length !== this._meshData.texCoords.length) {
+				debugLog(`Mesh #${this._id}: WARNING - texCoords length mismatch! source=${texCoords.length}, target=${this._meshData.texCoords.length}`);
+			}
 			this._meshData.texCoords.set(texCoords);
 		} else {
 			// Initialize UVs to 0,0 to avoid garbage values
