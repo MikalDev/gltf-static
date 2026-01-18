@@ -1,0 +1,25 @@
+{
+  "name": "gltfstatic",
+  "version": "1.0.0",
+  "description": "glTF Static - Construct 3 plugin for loading static glTF 3D models",
+  "main": "c3runtime/main.js",
+  "scripts": {
+    "build": "tsc && node build.js",
+    "watch": "tsc --watch"
+  },
+  "keywords": [
+    "construct3",
+    "gltf",
+    "3d",
+    "plugin"
+  ],
+  "author": "Mikal",
+  "license": "MIT",
+  "dependencies": {
+    "@gltf-transform/core": "^4.3.0",
+    "gl-matrix": "^3.4.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.2"
+  }
+}

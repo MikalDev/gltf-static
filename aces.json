@@ -5,6 +5,18 @@
 				"id": "is-loaded",
 				"scriptName": "IsLoaded",
 				"highlight": false
+			},
+			{
+				"id": "on-loaded",
+				"scriptName": "OnLoaded",
+				"highlight": true,
+				"isTrigger": true
+			},
+			{
+				"id": "on-load-error",
+				"scriptName": "OnLoadError",
+				"highlight": false,
+				"isTrigger": true
 			}
 		],
 		"actions": [

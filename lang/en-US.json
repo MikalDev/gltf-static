@@ -43,6 +43,16 @@
 						"list-name": "Is loaded",
 						"display-text": "{my} model is loaded",
 						"description": "True if the glTF model has finished loading."
+					},
+					"on-loaded": {
+						"list-name": "On loaded",
+						"display-text": "On {my} model loaded",
+						"description": "Triggered when the glTF model finishes loading successfully."
+					},
+					"on-load-error": {
+						"list-name": "On load error",
+						"display-text": "On {my} model load error",
+						"description": "Triggered when the glTF model fails to load."
 					}
 				},
 				"actions": {

@@ -19,6 +19,7 @@
 		"c3runtime/main.js",
 		"c3runtime/plugin.js",
 		"c3runtime/type.js",
+		"c3runtime/gltf-bundle.js",
 		"c3runtime/instance.js",
 		"c3runtime/conditions.js",
 		"c3runtime/actions.js",

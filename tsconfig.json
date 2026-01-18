@@ -11,9 +11,12 @@
 		"lib": ["ES2021", "DOM"]
 	},
 	"include": [
-		"*.ts",
 		"c3runtime/*.ts",
+		"c3runtime/gltf/*.ts",
 		"ts-defs/editor/**/*.d.ts",
 		"ts-defs/runtime/**/*.d.ts"
+	],
+	"exclude": [
+		"build.js"
 	]
 }
