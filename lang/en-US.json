@@ -33,6 +33,10 @@
 					"rotation-z": {
 						"name": "Rotation Z",
 						"desc": "Initial Z rotation of the model in degrees."
+					},
+					"scale": {
+						"name": "Scale",
+						"desc": "Uniform scale factor for the model (applied on load)."
 					}
 				},
 				"aceCategories": {
@@ -85,6 +89,36 @@
 								"desc": "Z rotation in degrees."
 							}
 						}
+					},
+					"set-scale": {
+						"list-name": "Set scale",
+						"display-text": "{my} set uniform scale to [b]{0}[/b]",
+						"description": "Set uniform scale for all axes. Applied via transform matrix (GPU efficient).",
+						"params": {
+							"scale": {
+								"name": "Scale",
+								"desc": "Uniform scale factor (1 = normal size)."
+							}
+						}
+					},
+					"set-scale-xyz": {
+						"list-name": "Set scale XYZ",
+						"display-text": "{my} set scale to ([b]{0}[/b], [b]{1}[/b], [b]{2}[/b])",
+						"description": "Set non-uniform scale per axis. Applied via transform matrix (GPU efficient).",
+						"params": {
+							"x": {
+								"name": "X",
+								"desc": "Scale factor for X axis."
+							},
+							"y": {
+								"name": "Y",
+								"desc": "Scale factor for Y axis."
+							},
+							"z": {
+								"name": "Z",
+								"desc": "Scale factor for Z axis."
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -99,6 +133,18 @@
 					"rotation-z": {
 						"description": "Get the current Z rotation.",
 						"translated-name": "RotationZ"
+					},
+					"scale-x": {
+						"description": "Get the current X scale factor.",
+						"translated-name": "ScaleX"
+					},
+					"scale-y": {
+						"description": "Get the current Y scale factor.",
+						"translated-name": "ScaleY"
+					},
+					"scale-z": {
+						"description": "Get the current Z scale factor.",
+						"translated-name": "ScaleZ"
 					}
 				}
 			}

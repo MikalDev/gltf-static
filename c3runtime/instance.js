@@ -16,11 +16,12 @@ function debugError(...args) {
     console.error(LOG_PREFIX, ...args);
 }
 // Property indices (link properties are excluded from _getInitProperties)
-// Only data properties are included: model-url, rotation-x, rotation-y, rotation-z
+// Only data properties are included: model-url, rotation-x, rotation-y, rotation-z, scale
 const PROP_MODEL_URL = 0;
 const PROP_ROTATION_X = 1;
 const PROP_ROTATION_Y = 2;
 const PROP_ROTATION_Z = 3;
+const PROP_SCALE = 4;
 // Reusable matrix/vectors for transform calculations (avoid per-frame allocations)
 const tempMatrix = mat4.create();
 const tempVec = vec3.create();
@@ -34,6 +35,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._rotationX = 0;
         this._rotationY = 0;
         this._rotationZ = 0;
+        this._scaleX = 1;
+        this._scaleY = 1;
+        this._scaleZ = 1;
         // glTF model
         this._model = null;
         this._isLoading = false;
@@ -46,6 +50,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._lastRotationX = NaN;
         this._lastRotationY = NaN;
         this._lastRotationZ = NaN;
+        this._lastScaleX = NaN;
+        this._lastScaleY = NaN;
+        this._lastScaleZ = NaN;
         // Debug stats
         this._drawCount = 0;
         this._lastDrawTime = 0;
@@ -57,11 +64,17 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
             this._rotationX = props[PROP_ROTATION_X];
             this._rotationY = props[PROP_ROTATION_Y];
             this._rotationZ = props[PROP_ROTATION_Z];
+            // Uniform scale property sets all axes
+            const uniformScale = props[PROP_SCALE];
+            this._scaleX = uniformScale;
+            this._scaleY = uniformScale;
+            this._scaleZ = uniformScale;
             debugLog("Properties loaded:", {
                 modelUrl: this._modelUrl,
                 rotationX: this._rotationX,
                 rotationY: this._rotationY,
-                rotationZ: this._rotationZ
+                rotationZ: this._rotationZ,
+                scale: { x: this._scaleX, y: this._scaleY, z: this._scaleZ }
             });
             // Auto-load model if URL is set
             if (this._modelUrl) {
@@ -90,7 +103,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
             this._lastZElevation !== this.zElevation ||
             this._lastRotationX !== this._rotationX ||
             this._lastRotationY !== this._rotationY ||
-            this._lastRotationZ !== this._rotationZ);
+            this._lastRotationZ !== this._rotationZ ||
+            this._lastScaleX !== this._scaleX ||
+            this._lastScaleY !== this._scaleY ||
+            this._lastScaleZ !== this._scaleZ);
     }
     /**
      * Build transform matrix from instance properties.
@@ -117,9 +133,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         if (this._rotationZ !== 0) {
             mat4.rotateZ(tempMatrix, tempMatrix, this._rotationZ * DEG_TO_RAD);
         }
-        // 4. Scale based on instance size (uniform scale using width)
-        const scale = this.width;
-        vec3.set(tempVec, scale, scale, scale);
+        // 4. Scale based on instance size and per-axis scale factors
+        // Instance width provides base scale, then per-axis multipliers are applied
+        const baseScale = this.width;
+        vec3.set(tempVec, baseScale * this._scaleX, baseScale * this._scaleY, baseScale * this._scaleZ);
         mat4.scale(tempMatrix, tempMatrix, tempVec);
         // Update last transform values for dirty checking
         this._lastX = this.x;
@@ -130,6 +147,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._lastRotationX = this._rotationX;
         this._lastRotationY = this._rotationY;
         this._lastRotationZ = this._rotationZ;
+        this._lastScaleX = this._scaleX;
+        this._lastScaleY = this._scaleY;
+        this._lastScaleZ = this._scaleZ;
         return tempMatrix;
     }
     _draw(renderer) {
@@ -204,6 +224,28 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._rotationY = y;
         this._rotationZ = z;
     }
+    // Scale getters - GPU data stays static, only transform matrix changes
+    _getScaleX() {
+        return this._scaleX;
+    }
+    _getScaleY() {
+        return this._scaleY;
+    }
+    _getScaleZ() {
+        return this._scaleZ;
+    }
+    // Set uniform scale (all axes)
+    _setScale(scale) {
+        this._scaleX = scale;
+        this._scaleY = scale;
+        this._scaleZ = scale;
+    }
+    // Set non-uniform scale (per axis)
+    _setScaleXYZ(x, y, z) {
+        this._scaleX = x;
+        this._scaleY = y;
+        this._scaleZ = z;
+    }
     _isModelLoaded() {
         return this._model?.isLoaded ?? false;
     }
@@ -253,7 +295,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
             "modelUrl": this._modelUrl,
             "rotationX": this._rotationX,
             "rotationY": this._rotationY,
-            "rotationZ": this._rotationZ
+            "rotationZ": this._rotationZ,
+            "scaleX": this._scaleX,
+            "scaleY": this._scaleY,
+            "scaleZ": this._scaleZ
         };
     }
     _loadFromJson(o) {
@@ -262,6 +307,19 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
         this._rotationX = data["rotationX"];
         this._rotationY = data["rotationY"];
         this._rotationZ = data["rotationZ"];
+        // Support both old uniform scale and new per-axis scale
+        if ("scaleX" in data) {
+            this._scaleX = data["scaleX"] ?? 1;
+            this._scaleY = data["scaleY"] ?? 1;
+            this._scaleZ = data["scaleZ"] ?? 1;
+        }
+        else {
+            // Legacy: uniform scale
+            const uniformScale = data["scale"] ?? 1;
+            this._scaleX = uniformScale;
+            this._scaleY = uniformScale;
+            this._scaleZ = uniformScale;
+        }
         // Reload model after restoring state
         if (this._modelUrl) {
             this._loadModel(this._modelUrl);

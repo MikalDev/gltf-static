@@ -1,7 +1,7 @@
 import type { SDKEditorInstanceClass } from "./instance.ts";
 
 const PLUGIN_ID = "GltfStatic";
-const PLUGIN_CATEGORY: PluginInfoCategory = "general";
+const PLUGIN_CATEGORY: PluginInfoCategory = "3d";
 
 const PLUGIN_CLASS = SDK.Plugins.GltfStatic = class GltfStaticPlugin extends SDK.IPluginBase
 {
@@ -22,6 +22,7 @@ const PLUGIN_CLASS = SDK.Plugins.GltfStatic = class GltfStaticPlugin extends SDK
 		this._info.SetHasImage(true);
 		this._info.SetSupportsEffects(true);
 		this._info.SetMustPreDraw(true);
+		this._info.SetIs3D(true);
 		this._info.SetRuntimeModuleMainScript("c3runtime/main.js");
 		this._info.AddC3RuntimeScript("c3runtime/gltf-bundle.js");
 
@@ -45,7 +46,8 @@ const PLUGIN_CLASS = SDK.Plugins.GltfStatic = class GltfStaticPlugin extends SDK
 			new SDK.PluginProperty("text", "model-url", ""),
 			new SDK.PluginProperty("float", "rotation-x", 0),
 			new SDK.PluginProperty("float", "rotation-y", 0),
-			new SDK.PluginProperty("float", "rotation-z", 0)
+			new SDK.PluginProperty("float", "rotation-z", 0),
+			new SDK.PluginProperty("float", "scale", 1)
 		]);
 
 		SDK.Lang.PopContext();

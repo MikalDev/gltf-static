@@ -49,6 +49,36 @@
 						"type": "number"
 					}
 				]
+			},
+			{
+				"id": "set-scale",
+				"scriptName": "SetScale",
+				"highlight": false,
+				"params": [
+					{
+						"id": "scale",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "set-scale-xyz",
+				"scriptName": "SetScaleXYZ",
+				"highlight": false,
+				"params": [
+					{
+						"id": "x",
+						"type": "number"
+					},
+					{
+						"id": "y",
+						"type": "number"
+					},
+					{
+						"id": "z",
+						"type": "number"
+					}
+				]
 			}
 		],
 		"expressions": [
@@ -65,6 +95,21 @@
 			{
 				"id": "rotation-z",
 				"expressionName": "RotationZ",
+				"returnType": "number"
+			},
+			{
+				"id": "scale-x",
+				"expressionName": "ScaleX",
+				"returnType": "number"
+			},
+			{
+				"id": "scale-y",
+				"expressionName": "ScaleY",
+				"returnType": "number"
+			},
+			{
+				"id": "scale-z",
+				"expressionName": "ScaleZ",
 				"returnType": "number"
 			}
 		]

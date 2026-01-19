@@ -25,3 +25,6 @@ npm-debug.log*
 
 # Test models (can be re-downloaded)
 models/
+
+# Distribution builds
+dist/

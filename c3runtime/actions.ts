@@ -10,5 +10,15 @@ C3.Plugins.GltfStatic.Acts =
 	SetRotation(this: SDKInstanceClass, x: number, y: number, z: number): void
 	{
 		this._setRotation(x, y, z);
+	},
+
+	SetScale(this: SDKInstanceClass, scale: number): void
+	{
+		this._setScale(scale);
+	},
+
+	SetScaleXYZ(this: SDKInstanceClass, x: number, y: number, z: number): void
+	{
+		this._setScaleXYZ(x, y, z);
 	}
 };

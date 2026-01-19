@@ -8,6 +8,15 @@ C3.Plugins.GltfStatic.Exps =
         },
         RotationZ() {
             return this._getRotationZ();
+        },
+        ScaleX() {
+            return this._getScaleX();
+        },
+        ScaleY() {
+            return this._getScaleY();
+        },
+        ScaleZ() {
+            return this._getScaleZ();
         }
     };
 export {};

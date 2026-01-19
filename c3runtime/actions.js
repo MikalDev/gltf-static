@@ -5,6 +5,12 @@ C3.Plugins.GltfStatic.Acts =
         },
         SetRotation(x, y, z) {
             this._setRotation(x, y, z);
+        },
+        SetScale(scale) {
+            this._setScale(scale);
+        },
+        SetScaleXYZ(x, y, z) {
+            this._setScaleXYZ(x, y, z);
         }
     };
 export {};

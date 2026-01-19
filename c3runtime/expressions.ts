@@ -15,5 +15,20 @@ C3.Plugins.GltfStatic.Exps =
 	RotationZ(this: SDKInstanceClass): number
 	{
 		return this._getRotationZ();
+	},
+
+	ScaleX(this: SDKInstanceClass): number
+	{
+		return this._getScaleX();
+	},
+
+	ScaleY(this: SDKInstanceClass): number
+	{
+		return this._getScaleY();
+	},
+
+	ScaleZ(this: SDKInstanceClass): number
+	{
+		return this._getScaleZ();
 	}
 };
