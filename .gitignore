@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Build outputs (keep .js files since they're needed for the addon)
-# *.js
+# TypeScript compiled outputs (built from *.ts)
+c3runtime/gltf/*.js
+editor-gltf-model.js
 
 # IDE
 .vscode/
