@@ -11,6 +11,9 @@ C3.Plugins.GltfStatic.Acts =
         },
         SetScaleXYZ(x, y, z) {
             this._setScaleXYZ(x, y, z);
+        },
+        SetWorkerEnabled(enabled) {
+            this._setWorkerEnabled(enabled !== 0);
         }
     };
 export {};

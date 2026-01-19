@@ -7533,10 +7533,21 @@ var _GltfMesh = class _GltfMesh {
   constructor() {
     this._meshData = null;
     this._texture = null;
-    // Store original positions for runtime transform updates
+    // Store original positions for runtime transform updates (sync fallback)
     this._originalPositions = null;
     this._vertexCount = 0;
+    // Worker pool integration
+    this._workerPool = null;
+    this._isRegisteredWithPool = false;
     this._id = _GltfMesh._nextId++;
+  }
+  /** Get unique mesh ID */
+  get id() {
+    return this._id;
+  }
+  /** Get vertex count */
+  get vertexCount() {
+    return this._vertexCount;
   }
   /**
    * Create GPU buffers and upload mesh data.
@@ -7569,23 +7580,64 @@ var _GltfMesh = class _GltfMesh {
     this._texture = texture;
   }
   /**
-   * Update vertex positions by applying a transform matrix to original positions.
-   * Uses gl-matrix for efficient transformation.
+   * Register this mesh with a worker pool for async transforms.
+   * Call after create(). Transfers a copy of positions to the worker.
    */
-  updateTransform(matrix) {
+  registerWithPool(pool) {
+    if (this._isRegisteredWithPool || !this._originalPositions) return;
+    this._workerPool = pool;
+    const positionsCopy = new Float32Array(this._originalPositions);
+    pool.registerMesh(this._id, positionsCopy, (transformedPositions) => {
+      this._applyPositions(transformedPositions);
+    });
+    this._isRegisteredWithPool = true;
+    debugLog(`Mesh #${this._id}: Registered with worker pool`);
+  }
+  /**
+   * Queue transform to worker pool. Must call pool.flush() to execute.
+   */
+  queueTransform(matrix) {
+    if (!this._workerPool || !this._isRegisteredWithPool) return;
+    this._workerPool.queueTransform(this._id, matrix);
+  }
+  /**
+   * Apply transformed positions received from worker.
+   */
+  _applyPositions(positions) {
+    if (!this._meshData) return;
+    this._meshData.positions.set(positions);
+    this._meshData.markDataChanged("positions", 0, this._vertexCount);
+  }
+  /**
+   * Update vertex positions synchronously (fallback when workers unavailable).
+   * Uses inline matrix math for performance.
+   */
+  updateTransformSync(matrix) {
     if (!this._meshData || !this._originalPositions) return;
     const positions = this._meshData.positions;
     const original = this._originalPositions;
-    const tempVec = _GltfMesh._tempVec;
-    for (let i = 0; i < this._vertexCount; i++) {
+    const n = this._vertexCount;
+    const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
+    const m4 = matrix[4], m5 = matrix[5], m6 = matrix[6];
+    const m8 = matrix[8], m9 = matrix[9], m10 = matrix[10];
+    const m12 = matrix[12], m13 = matrix[13], m14 = matrix[14];
+    for (let i = 0; i < n; i++) {
       const idx = i * 3;
-      vec3_exports.set(tempVec, original[idx], original[idx + 1], original[idx + 2]);
-      vec3_exports.transformMat4(tempVec, tempVec, matrix);
-      positions[idx] = tempVec[0];
-      positions[idx + 1] = tempVec[1];
-      positions[idx + 2] = tempVec[2];
+      const x = original[idx];
+      const y = original[idx + 1];
+      const z = original[idx + 2];
+      positions[idx] = m0 * x + m4 * y + m8 * z + m12;
+      positions[idx + 1] = m1 * x + m5 * y + m9 * z + m13;
+      positions[idx + 2] = m2 * x + m6 * y + m10 * z + m14;
     }
-    this._meshData.markDataChanged("positions", 0, this._vertexCount);
+    this._meshData.markDataChanged("positions", 0, n);
+  }
+  /**
+   * Legacy alias for updateTransformSync.
+   * @deprecated Use updateTransformSync or queueTransform + pool.flush()
+   */
+  updateTransform(matrix) {
+    this.updateTransformSync(matrix);
   }
   /**
    * Draw this mesh with its texture.
@@ -7603,10 +7655,15 @@ var _GltfMesh = class _GltfMesh {
     renderer.drawMeshData(this._meshData);
   }
   /**
-   * Release GPU resources.
+   * Release GPU resources and unregister from worker pool.
    */
   release() {
     debugLog(`Mesh #${this._id}: Releasing GPU resources`);
+    if (this._workerPool && this._isRegisteredWithPool) {
+      this._workerPool.unregisterMesh(this._id);
+      this._isRegisteredWithPool = false;
+    }
+    this._workerPool = null;
     if (this._meshData) {
       this._meshData.release();
       this._meshData = null;
@@ -7618,9 +7675,251 @@ var _GltfMesh = class _GltfMesh {
 };
 // Debug: track mesh ID for logging
 _GltfMesh._nextId = 0;
-// Reusable temp vector (avoid allocations in hot path)
-_GltfMesh._tempVec = vec3_exports.create();
 var GltfMesh = _GltfMesh;
+
+// c3runtime/gltf/TransformWorkerPool.ts
+var WORKER_CODE = `
+const meshCache = new Map();
+
+// Transform vertices from original to output buffer at specified offset
+function transformVerticesInto(original, output, offset, matrix, vertexCount) {
+	const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
+	const m4 = matrix[4], m5 = matrix[5], m6 = matrix[6];
+	const m8 = matrix[8], m9 = matrix[9], m10 = matrix[10];
+	const m12 = matrix[12], m13 = matrix[13], m14 = matrix[14];
+
+	for (let i = 0; i < vertexCount; i++) {
+		const srcIdx = i * 3;
+		const dstIdx = offset + srcIdx;
+		const x = original[srcIdx];
+		const y = original[srcIdx + 1];
+		const z = original[srcIdx + 2];
+
+		output[dstIdx] = m0 * x + m4 * y + m8 * z + m12;
+		output[dstIdx + 1] = m1 * x + m5 * y + m9 * z + m13;
+		output[dstIdx + 2] = m2 * x + m6 * y + m10 * z + m14;
+	}
+}
+
+self.onmessage = (e) => {
+	const msg = e.data;
+
+	switch (msg.type) {
+		case "REGISTER": {
+			const positions = msg.positions;
+			const vertexCount = positions.length / 3;
+			meshCache.set(msg.meshId, {
+				original: positions,
+				vertexCount,
+				floatCount: positions.length
+			});
+			break;
+		}
+
+		case "TRANSFORM_BATCH": {
+			// Calculate total size needed for packed buffer
+			let totalFloats = 0;
+			const meshEntries = [];
+			for (const req of msg.requests) {
+				const entry = meshCache.get(req.meshId);
+				if (!entry) continue;
+				totalFloats += entry.floatCount;
+				meshEntries.push({ req, entry });
+			}
+
+			if (meshEntries.length === 0) {
+				// No valid meshes, send empty response
+				self.postMessage({ type: "TRANSFORM_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0) }, []);
+				break;
+			}
+
+			// Allocate single packed buffer
+			const packedPositions = new Float32Array(totalFloats);
+			const offsets = new Uint32Array(meshEntries.length + 1);
+			const meshIds = new Uint32Array(meshEntries.length);
+
+			let offset = 0;
+			for (let i = 0; i < meshEntries.length; i++) {
+				const { req, entry } = meshEntries[i];
+
+				// Transform into packed buffer directly
+				transformVerticesInto(entry.original, packedPositions, offset, req.matrix, entry.vertexCount);
+
+				meshIds[i] = req.meshId;
+				offsets[i] = offset;
+				offset += entry.floatCount;
+			}
+			offsets[meshEntries.length] = offset; // End marker
+
+			self.postMessage(
+				{ type: "TRANSFORM_RESULTS", meshIds, offsets, positions: packedPositions },
+				[packedPositions.buffer, meshIds.buffer, offsets.buffer]
+			);
+			break;
+		}
+
+		case "UNREGISTER": {
+			meshCache.delete(msg.meshId);
+			break;
+		}
+
+		case "CLEAR": {
+			meshCache.clear();
+			break;
+		}
+	}
+};
+`;
+var TransformWorkerPool = class {
+  constructor(workerCount) {
+    this._workers = [];
+    this._workerBlobUrl = null;
+    this._meshRegistry = /* @__PURE__ */ new Map();
+    this._pendingByWorker = /* @__PURE__ */ new Map();
+    this._flushResolvers = [];
+    this._pendingResponses = 0;
+    this._nextWorkerIndex = 0;
+    this._disposed = false;
+    this._workerCount = workerCount ?? Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+    this._initWorkers();
+  }
+  _initWorkers() {
+    const blob = new Blob([WORKER_CODE], { type: "application/javascript" });
+    this._workerBlobUrl = URL.createObjectURL(blob);
+    for (let i = 0; i < this._workerCount; i++) {
+      const worker = new Worker(this._workerBlobUrl);
+      worker.onmessage = (e) => this._handleMessage(e.data);
+      worker.onerror = (e) => console.error("[TransformWorkerPool] Worker error:", e);
+      this._workers.push(worker);
+      this._pendingByWorker.set(i, []);
+    }
+  }
+  /**
+   * Register a mesh with the pool. Positions are transferred to worker (zero-copy).
+   * @param meshId Unique mesh identifier
+   * @param positions Original vertex positions (will be transferred, becomes unusable)
+   * @param callback Called with transformed positions after flush()
+   */
+  registerMesh(meshId, positions, callback) {
+    if (this._disposed) return;
+    const workerIndex = this._nextWorkerIndex;
+    this._nextWorkerIndex = (this._nextWorkerIndex + 1) % this._workerCount;
+    this._meshRegistry.set(meshId, { workerIndex, callback });
+    this._workers[workerIndex].postMessage(
+      { type: "REGISTER", meshId, positions },
+      [positions.buffer]
+    );
+  }
+  /**
+   * Queue a transform request. Call flush() to execute batched requests.
+   */
+  queueTransform(meshId, matrix) {
+    if (this._disposed) return;
+    const registration = this._meshRegistry.get(meshId);
+    if (!registration) {
+      console.warn(`[TransformWorkerPool] Mesh ${meshId} not registered`);
+      return;
+    }
+    this._pendingByWorker.get(registration.workerIndex).push({
+      meshId,
+      matrix: new Float32Array(matrix)
+      // Copy matrix (small, avoids issues if caller reuses)
+    });
+  }
+  /**
+   * Send all queued transforms to workers and wait for completion.
+   * Invokes registered callbacks with results.
+   */
+  async flush() {
+    if (this._disposed) return;
+    let workersWithWork = 0;
+    for (let i = 0; i < this._workerCount; i++) {
+      const pending = this._pendingByWorker.get(i);
+      if (pending.length > 0) {
+        workersWithWork++;
+        this._workers[i].postMessage({
+          type: "TRANSFORM_BATCH",
+          requests: pending
+        });
+        this._pendingByWorker.set(i, []);
+      }
+    }
+    if (workersWithWork === 0) return;
+    this._pendingResponses = workersWithWork;
+    return new Promise((resolve) => {
+      this._flushResolvers.push(resolve);
+    });
+  }
+  _handleMessage(msg) {
+    if (msg.type === "TRANSFORM_RESULTS" && msg.positions && msg.meshIds && msg.offsets) {
+      const { meshIds, offsets, positions } = msg;
+      for (let i = 0; i < meshIds.length; i++) {
+        const meshId = meshIds[i];
+        const start = offsets[i];
+        const end = offsets[i + 1];
+        const registration = this._meshRegistry.get(meshId);
+        if (registration) {
+          const meshPositions = positions.subarray(start, end);
+          registration.callback(meshPositions);
+        }
+      }
+      this._pendingResponses--;
+      if (this._pendingResponses === 0) {
+        const resolvers = this._flushResolvers;
+        this._flushResolvers = [];
+        for (const resolve of resolvers) {
+          resolve();
+        }
+      }
+    }
+  }
+  /**
+   * Remove a mesh from the pool.
+   */
+  unregisterMesh(meshId) {
+    const registration = this._meshRegistry.get(meshId);
+    if (registration && !this._disposed) {
+      this._workers[registration.workerIndex].postMessage({
+        type: "UNREGISTER",
+        meshId
+      });
+    }
+    this._meshRegistry.delete(meshId);
+  }
+  /**
+   * Get number of registered meshes.
+   */
+  get meshCount() {
+    return this._meshRegistry.size;
+  }
+  /**
+   * Get number of workers in pool.
+   */
+  get workerCount() {
+    return this._workerCount;
+  }
+  /**
+   * Clean up all workers and resources.
+   */
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    for (const worker of this._workers) {
+      worker.terminate();
+    }
+    this._workers = [];
+    if (this._workerBlobUrl) {
+      URL.revokeObjectURL(this._workerBlobUrl);
+      this._workerBlobUrl = null;
+    }
+    this._meshRegistry.clear();
+    this._pendingByWorker.clear();
+    for (const resolve of this._flushResolvers) {
+      resolve();
+    }
+    this._flushResolvers = [];
+  }
+};
 
 // c3runtime/gltf/GltfModel.ts
 var DEBUG2 = true;
@@ -7640,9 +7939,17 @@ var GltfModel = class {
     // Stats tracking
     this._totalVertices = 0;
     this._totalIndices = 0;
+    // Worker pool for async transforms (created on demand)
+    this._workerPool = null;
+    this._useWorkers = false;
+    this._options = {};
   }
   get isLoaded() {
     return this._isLoaded;
+  }
+  /** Whether worker pool is being used for transforms */
+  get useWorkers() {
+    return this._useWorkers && this._workerPool !== null;
   }
   /**
    * Get statistics about the loaded model.
@@ -7659,10 +7966,14 @@ var GltfModel = class {
   }
   /**
    * Load model from URL.
+   * @param renderer The C3 renderer
+   * @param url URL to glTF/GLB file
+   * @param options Optional configuration for worker pool
    */
-  async load(renderer, url) {
+  async load(renderer, url, options) {
     debugLog2("Loading glTF from:", url);
     const loadStart = performance.now();
+    this._options = options || {};
     const loadedTextures = [];
     const loadedMeshes = [];
     this._totalVertices = 0;
@@ -7694,11 +8005,13 @@ var GltfModel = class {
       this._textures = loadedTextures;
       this._meshes = loadedMeshes;
       this._isLoaded = true;
+      this._setupWorkerPool();
       debugLog2(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
         meshes: this._meshes.length,
         textures: this._textures.length,
         vertices: this._totalVertices,
-        indices: this._totalIndices
+        indices: this._totalIndices,
+        useWorkers: this._useWorkers
       });
     } catch (err) {
       debugWarn("Load failed, cleaning up partial resources...");
@@ -7710,6 +8023,67 @@ var GltfModel = class {
       }
       throw err;
     }
+  }
+  /**
+   * Setup worker pool based on options. Workers are enabled by default.
+   */
+  _setupWorkerPool() {
+    if (this._options.useWorkers === false) {
+      debugLog2("Worker pool explicitly disabled");
+      this._useWorkers = false;
+      return;
+    }
+    try {
+      this._workerPool = new TransformWorkerPool(this._options.workerCount);
+      this._useWorkers = true;
+      for (const mesh of this._meshes) {
+        mesh.registerWithPool(this._workerPool);
+      }
+      debugLog2(`Worker pool created with ${this._workerPool.workerCount} workers, ${this._meshes.length} meshes registered`);
+    } catch (err) {
+      debugWarn("Failed to create worker pool, falling back to sync transforms:", err);
+      this._useWorkers = false;
+      this._workerPool = null;
+    }
+  }
+  /**
+   * Enable or disable worker pool at runtime.
+   * When disabling, the pool is disposed.
+   * When enabling, a new pool is created if meshes exist.
+   */
+  setWorkersEnabled(enabled) {
+    if (enabled === this._useWorkers) return;
+    if (!enabled) {
+      if (this._workerPool) {
+        this._workerPool.dispose();
+        this._workerPool = null;
+      }
+      this._useWorkers = false;
+      debugLog2("Workers disabled");
+    } else {
+      if (this._meshes.length === 0) {
+        debugLog2("No meshes to register with workers");
+        return;
+      }
+      try {
+        this._workerPool = new TransformWorkerPool(this._options.workerCount);
+        this._useWorkers = true;
+        for (const mesh of this._meshes) {
+          mesh.registerWithPool(this._workerPool);
+        }
+        debugLog2(`Workers enabled with ${this._workerPool.workerCount} workers`);
+      } catch (err) {
+        debugWarn("Failed to enable workers:", err);
+        this._useWorkers = false;
+        this._workerPool = null;
+      }
+    }
+  }
+  /**
+   * Get the number of active workers (0 if workers disabled).
+   */
+  getWorkerCount() {
+    return this._workerPool?.workerCount ?? 0;
   }
   /**
    * Load all textures, return map for lookup.
@@ -7906,11 +8280,40 @@ var GltfModel = class {
     return result;
   }
   /**
-   * Update all mesh transforms with a new instance transform matrix.
+   * Update all mesh transforms synchronously (fallback mode).
+   */
+  updateTransformSync(matrix) {
+    for (const mesh of this._meshes) {
+      mesh.updateTransformSync(matrix);
+    }
+  }
+  /**
+   * Update all mesh transforms using worker pool.
+   * Queues transforms and flushes, awaiting completion.
+   */
+  async updateTransformAsync(matrix) {
+    if (!this._workerPool || !this._useWorkers) {
+      this.updateTransformSync(matrix);
+      return;
+    }
+    for (const mesh of this._meshes) {
+      mesh.queueTransform(matrix);
+    }
+    await this._workerPool.flush();
+  }
+  /**
+   * Update all mesh transforms. Uses workers if available, otherwise sync.
+   * Note: When using workers, this is async but returns immediately.
+   * Call updateTransformAsync() if you need to await completion.
    */
   updateTransform(matrix) {
-    for (const mesh of this._meshes) {
-      mesh.updateTransform(matrix);
+    if (this._workerPool && this._useWorkers) {
+      for (const mesh of this._meshes) {
+        mesh.queueTransform(matrix);
+      }
+      this._workerPool.flush();
+    } else {
+      this.updateTransformSync(matrix);
     }
   }
   /**
@@ -7928,6 +8331,11 @@ var GltfModel = class {
    * Release all resources.
    */
   release(renderer) {
+    if (this._workerPool) {
+      this._workerPool.dispose();
+      this._workerPool = null;
+    }
+    this._useWorkers = false;
     for (const mesh of this._meshes) {
       mesh.release();
     }
@@ -7941,10 +8349,11 @@ var GltfModel = class {
 };
 
 // c3runtime/gltf/index.ts
-globalThis.GltfBundle = { GltfModel, GltfMesh, mat4: mat4_exports, vec3: vec3_exports, quat: quat_exports };
+globalThis.GltfBundle = { GltfModel, GltfMesh, TransformWorkerPool, mat4: mat4_exports, vec3: vec3_exports, quat: quat_exports };
 export {
   GltfMesh,
   GltfModel,
+  TransformWorkerPool,
   mat4_exports as mat4,
   quat_exports as quat,
   vec3_exports as vec3

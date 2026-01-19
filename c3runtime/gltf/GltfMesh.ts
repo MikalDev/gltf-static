@@ -1,4 +1,5 @@
 import { vec3, mat4 } from "gl-matrix";
+import type { TransformWorkerPool } from "./TransformWorkerPool.js";
 
 // Debug logging - set to false to disable
 const DEBUG = true;
@@ -11,24 +12,37 @@ function debugLog(...args: unknown[]): void {
 /**
  * Represents a single mesh primitive with GPU-uploaded data.
  * Does NOT own texture - just holds reference (Model owns textures).
+ *
+ * Supports both sync transforms (fallback) and worker-based async transforms.
  */
 export class GltfMesh {
 	private _meshData: IMeshData | null = null;
 	private _texture: ITexture | null = null;
 
-	// Store original positions for runtime transform updates
+	// Store original positions for runtime transform updates (sync fallback)
 	private _originalPositions: Float32Array | null = null;
 	private _vertexCount: number = 0;
+
+	// Worker pool integration
+	private _workerPool: TransformWorkerPool | null = null;
+	private _isRegisteredWithPool = false;
 
 	// Debug: track mesh ID for logging
 	private static _nextId: number = 0;
 	private _id: number;
 
-	// Reusable temp vector (avoid allocations in hot path)
-	private static _tempVec: vec3 = vec3.create();
-
 	constructor() {
 		this._id = GltfMesh._nextId++;
+	}
+
+	/** Get unique mesh ID */
+	get id(): number {
+		return this._id;
+	}
+
+	/** Get vertex count */
+	get vertexCount(): number {
+		return this._vertexCount;
 	}
 
 	/**
@@ -49,7 +63,7 @@ export class GltfMesh {
 		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"})`);
 		debugLog(`Mesh #${this._id}: positions.length=${positions.length}, texCoords.length=${texCoords?.length}, expected texCoords=${expectedTexCoordLength}`);
 
-		// Store original positions for transform updates
+		// Store original positions for sync transform fallback
 		this._originalPositions = new Float32Array(positions);
 
 		this._meshData = renderer.createMeshData(this._vertexCount, indexCount);
@@ -84,26 +98,78 @@ export class GltfMesh {
 	}
 
 	/**
-	 * Update vertex positions by applying a transform matrix to original positions.
-	 * Uses gl-matrix for efficient transformation.
+	 * Register this mesh with a worker pool for async transforms.
+	 * Call after create(). Transfers a copy of positions to the worker.
 	 */
-	updateTransform(matrix: Float32Array): void {
+	registerWithPool(pool: TransformWorkerPool): void {
+		if (this._isRegisteredWithPool || !this._originalPositions) return;
+
+		this._workerPool = pool;
+
+		// Transfer a copy to the worker (keep original for sync fallback)
+		const positionsCopy = new Float32Array(this._originalPositions);
+		pool.registerMesh(this._id, positionsCopy, (transformedPositions) => {
+			this._applyPositions(transformedPositions);
+		});
+
+		this._isRegisteredWithPool = true;
+		debugLog(`Mesh #${this._id}: Registered with worker pool`);
+	}
+
+	/**
+	 * Queue transform to worker pool. Must call pool.flush() to execute.
+	 */
+	queueTransform(matrix: Float32Array): void {
+		if (!this._workerPool || !this._isRegisteredWithPool) return;
+		this._workerPool.queueTransform(this._id, matrix);
+	}
+
+	/**
+	 * Apply transformed positions received from worker.
+	 */
+	private _applyPositions(positions: Float32Array): void {
+		if (!this._meshData) return;
+		this._meshData.positions.set(positions);
+		this._meshData.markDataChanged("positions", 0, this._vertexCount);
+	}
+
+	/**
+	 * Update vertex positions synchronously (fallback when workers unavailable).
+	 * Uses inline matrix math for performance.
+	 */
+	updateTransformSync(matrix: Float32Array): void {
 		if (!this._meshData || !this._originalPositions) return;
 
 		const positions = this._meshData.positions;
 		const original = this._originalPositions;
-		const tempVec = GltfMesh._tempVec;
+		const n = this._vertexCount;
 
-		for (let i = 0; i < this._vertexCount; i++) {
+		// Pre-extract matrix elements (avoids repeated array access)
+		const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
+		const m4 = matrix[4], m5 = matrix[5], m6 = matrix[6];
+		const m8 = matrix[8], m9 = matrix[9], m10 = matrix[10];
+		const m12 = matrix[12], m13 = matrix[13], m14 = matrix[14];
+
+		for (let i = 0; i < n; i++) {
 			const idx = i * 3;
-			vec3.set(tempVec, original[idx], original[idx + 1], original[idx + 2]);
-			vec3.transformMat4(tempVec, tempVec, matrix as unknown as mat4);
-			positions[idx] = tempVec[0];
-			positions[idx + 1] = tempVec[1];
-			positions[idx + 2] = tempVec[2];
+			const x = original[idx];
+			const y = original[idx + 1];
+			const z = original[idx + 2];
+
+			positions[idx] = m0 * x + m4 * y + m8 * z + m12;
+			positions[idx + 1] = m1 * x + m5 * y + m9 * z + m13;
+			positions[idx + 2] = m2 * x + m6 * y + m10 * z + m14;
 		}
 
-		this._meshData.markDataChanged("positions", 0, this._vertexCount);
+		this._meshData.markDataChanged("positions", 0, n);
+	}
+
+	/**
+	 * Legacy alias for updateTransformSync.
+	 * @deprecated Use updateTransformSync or queueTransform + pool.flush()
+	 */
+	updateTransform(matrix: Float32Array): void {
+		this.updateTransformSync(matrix);
 	}
 
 	/**
@@ -127,10 +193,18 @@ export class GltfMesh {
 	}
 
 	/**
-	 * Release GPU resources.
+	 * Release GPU resources and unregister from worker pool.
 	 */
 	release(): void {
 		debugLog(`Mesh #${this._id}: Releasing GPU resources`);
+
+		// Unregister from worker pool if registered
+		if (this._workerPool && this._isRegisteredWithPool) {
+			this._workerPool.unregisterMesh(this._id);
+			this._isRegisteredWithPool = false;
+		}
+		this._workerPool = null;
+
 		if (this._meshData) {
 			this._meshData.release();
 			this._meshData = null;

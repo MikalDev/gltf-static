@@ -337,6 +337,40 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		return this._model?.isLoaded ?? false;
 	}
 
+	// Worker control methods
+	_setWorkerEnabled(enabled: boolean): void
+	{
+		if (this._model)
+		{
+			this._model.setWorkersEnabled(enabled);
+		}
+	}
+
+	_isUsingWorkers(): boolean
+	{
+		return this._model?.useWorkers ?? false;
+	}
+
+	_getWorkerEnabled(): number
+	{
+		return this._isUsingWorkers() ? 1 : 0;
+	}
+
+	_getWorkerCount(): number
+	{
+		return this._model?.getWorkerCount() ?? 0;
+	}
+
+	_getTotalVertices(): number
+	{
+		return this._model?.getStats().totalVertices ?? 0;
+	}
+
+	_getMeshCount(): number
+	{
+		return this._model?.getStats().meshCount ?? 0;
+	}
+
 	async _loadModel(url: string): Promise<void>
 	{
 		// Prevent concurrent loads

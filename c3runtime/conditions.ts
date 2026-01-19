@@ -15,5 +15,10 @@ C3.Plugins.GltfStatic.Cnds =
 	OnLoadError(this: SDKInstanceClass): boolean
 	{
 		return true; // Trigger condition - always returns true when triggered
+	},
+
+	IsUsingWorkers(this: SDKInstanceClass): boolean
+	{
+		return this._isUsingWorkers();
 	}
 };

@@ -57,6 +57,11 @@
 						"list-name": "On load error",
 						"display-text": "On {my} model load error",
 						"description": "Triggered when the glTF model fails to load."
+					},
+					"is-using-workers": {
+						"list-name": "Is using workers",
+						"display-text": "{my} is using workers",
+						"description": "True if worker threads are being used for transform calculations."
 					}
 				},
 				"actions": {
@@ -119,6 +124,21 @@
 								"desc": "Scale factor for Z axis."
 							}
 						}
+					},
+					"set-worker-enabled": {
+						"list-name": "Set worker enabled",
+						"display-text": "{my} set workers [b]{0}[/b]",
+						"description": "Enable or disable worker threads for transform calculations.",
+						"params": {
+							"enabled": {
+								"name": "Enabled",
+								"desc": "Whether to enable worker threads.",
+								"items": {
+									"disabled": "Disabled",
+									"enabled": "Enabled"
+								}
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -145,6 +165,22 @@
 					"scale-z": {
 						"description": "Get the current Z scale factor.",
 						"translated-name": "ScaleZ"
+					},
+					"worker-enabled": {
+						"description": "Returns 1 if workers are enabled, 0 otherwise.",
+						"translated-name": "WorkerEnabled"
+					},
+					"worker-count": {
+						"description": "Get the number of active worker threads.",
+						"translated-name": "WorkerCount"
+					},
+					"total-vertices": {
+						"description": "Get the total number of vertices in the model.",
+						"translated-name": "TotalVertices"
+					},
+					"mesh-count": {
+						"description": "Get the number of meshes in the model.",
+						"translated-name": "MeshCount"
 					}
 				}
 			}

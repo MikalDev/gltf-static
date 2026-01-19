@@ -17,6 +17,18 @@ C3.Plugins.GltfStatic.Exps =
         },
         ScaleZ() {
             return this._getScaleZ();
+        },
+        WorkerEnabled() {
+            return this._getWorkerEnabled();
+        },
+        WorkerCount() {
+            return this._getWorkerCount();
+        },
+        TotalVertices() {
+            return this._getTotalVertices();
+        },
+        MeshCount() {
+            return this._getMeshCount();
         }
     };
 export {};

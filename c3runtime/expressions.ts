@@ -30,5 +30,25 @@ C3.Plugins.GltfStatic.Exps =
 	ScaleZ(this: SDKInstanceClass): number
 	{
 		return this._getScaleZ();
+	},
+
+	WorkerEnabled(this: SDKInstanceClass): number
+	{
+		return this._getWorkerEnabled();
+	},
+
+	WorkerCount(this: SDKInstanceClass): number
+	{
+		return this._getWorkerCount();
+	},
+
+	TotalVertices(this: SDKInstanceClass): number
+	{
+		return this._getTotalVertices();
+	},
+
+	MeshCount(this: SDKInstanceClass): number
+	{
+		return this._getMeshCount();
 	}
 };

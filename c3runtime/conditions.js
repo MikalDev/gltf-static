@@ -8,6 +8,9 @@ C3.Plugins.GltfStatic.Cnds =
         },
         OnLoadError() {
             return true; // Trigger condition - always returns true when triggered
+        },
+        IsUsingWorkers() {
+            return this._isUsingWorkers();
         }
     };
 export {};

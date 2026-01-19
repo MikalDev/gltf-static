@@ -17,6 +17,11 @@
 				"scriptName": "OnLoadError",
 				"highlight": false,
 				"isTrigger": true
+			},
+			{
+				"id": "is-using-workers",
+				"scriptName": "IsUsingWorkers",
+				"highlight": false
 			}
 		],
 		"actions": [
@@ -79,6 +84,18 @@
 						"type": "number"
 					}
 				]
+			},
+			{
+				"id": "set-worker-enabled",
+				"scriptName": "SetWorkerEnabled",
+				"highlight": false,
+				"params": [
+					{
+						"id": "enabled",
+						"type": "combo",
+						"items": ["disabled", "enabled"]
+					}
+				]
 			}
 		],
 		"expressions": [
@@ -110,6 +127,26 @@
 			{
 				"id": "scale-z",
 				"expressionName": "ScaleZ",
+				"returnType": "number"
+			},
+			{
+				"id": "worker-enabled",
+				"expressionName": "WorkerEnabled",
+				"returnType": "number"
+			},
+			{
+				"id": "worker-count",
+				"expressionName": "WorkerCount",
+				"returnType": "number"
+			},
+			{
+				"id": "total-vertices",
+				"expressionName": "TotalVertices",
+				"returnType": "number"
+			},
+			{
+				"id": "mesh-count",
+				"expressionName": "MeshCount",
 				"returnType": "number"
 			}
 		]

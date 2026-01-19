@@ -1,6 +1,7 @@
 import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root } from "@gltf-transform/core";
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
+import { TransformWorkerPool } from "./TransformWorkerPool.js";
 
 // Debug logging - set to false to disable
 const DEBUG = true;
@@ -26,9 +27,17 @@ export interface GltfModelStats {
 	totalIndices: number;
 }
 
+/** Options for model loading and transform behavior */
+export interface GltfModelOptions {
+	/** Use worker pool for transforms. Default: true */
+	useWorkers?: boolean;
+	/** Number of workers in pool. Default: cores - 1 */
+	workerCount?: number;
+}
+
 /**
  * Loads and manages a complete glTF model.
- * Owns all textures and meshes (responsible for cleanup).
+ * Owns all textures, meshes, and worker pool (responsible for cleanup).
  * Node hierarchy is flattened - transforms baked into mesh positions at load time.
  */
 export class GltfModel {
@@ -40,8 +49,18 @@ export class GltfModel {
 	private _totalVertices: number = 0;
 	private _totalIndices: number = 0;
 
+	// Worker pool for async transforms (created on demand)
+	private _workerPool: TransformWorkerPool | null = null;
+	private _useWorkers = false;
+	private _options: GltfModelOptions = {};
+
 	get isLoaded(): boolean {
 		return this._isLoaded;
+	}
+
+	/** Whether worker pool is being used for transforms */
+	get useWorkers(): boolean {
+		return this._useWorkers && this._workerPool !== null;
 	}
 
 	/**
@@ -59,10 +78,15 @@ export class GltfModel {
 
 	/**
 	 * Load model from URL.
+	 * @param renderer The C3 renderer
+	 * @param url URL to glTF/GLB file
+	 * @param options Optional configuration for worker pool
 	 */
-	async load(renderer: IRenderer, url: string): Promise<void> {
+	async load(renderer: IRenderer, url: string, options?: GltfModelOptions): Promise<void> {
 		debugLog("Loading glTF from:", url);
 		const loadStart = performance.now();
+
+		this._options = options || {};
 
 		// Track resources for cleanup on error
 		const loadedTextures: ITexture[] = [];
@@ -107,11 +131,15 @@ export class GltfModel {
 			this._meshes = loadedMeshes;
 			this._isLoaded = true;
 
+			// 3. Setup worker pool if beneficial
+			this._setupWorkerPool();
+
 			debugLog(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
 				meshes: this._meshes.length,
 				textures: this._textures.length,
 				vertices: this._totalVertices,
-				indices: this._totalIndices
+				indices: this._totalIndices,
+				useWorkers: this._useWorkers
 			});
 		} catch (err) {
 			debugWarn("Load failed, cleaning up partial resources...");
@@ -124,6 +152,82 @@ export class GltfModel {
 			}
 			throw err; // Re-throw so caller can handle
 		}
+	}
+
+	/**
+	 * Setup worker pool based on options. Workers are enabled by default.
+	 */
+	private _setupWorkerPool(): void {
+		// Workers are enabled by default (user can disable via ACE)
+		if (this._options.useWorkers === false) {
+			debugLog("Worker pool explicitly disabled");
+			this._useWorkers = false;
+			return;
+		}
+
+		try {
+			this._workerPool = new TransformWorkerPool(this._options.workerCount);
+			this._useWorkers = true;
+
+			// Register all meshes with pool
+			for (const mesh of this._meshes) {
+				mesh.registerWithPool(this._workerPool);
+			}
+
+			debugLog(`Worker pool created with ${this._workerPool.workerCount} workers, ${this._meshes.length} meshes registered`);
+		} catch (err) {
+			debugWarn("Failed to create worker pool, falling back to sync transforms:", err);
+			this._useWorkers = false;
+			this._workerPool = null;
+		}
+	}
+
+	/**
+	 * Enable or disable worker pool at runtime.
+	 * When disabling, the pool is disposed.
+	 * When enabling, a new pool is created if meshes exist.
+	 */
+	setWorkersEnabled(enabled: boolean): void {
+		if (enabled === this._useWorkers) return;
+
+		if (!enabled) {
+			// Disable workers
+			if (this._workerPool) {
+				this._workerPool.dispose();
+				this._workerPool = null;
+			}
+			this._useWorkers = false;
+			debugLog("Workers disabled");
+		} else {
+			// Enable workers - create new pool
+			if (this._meshes.length === 0) {
+				debugLog("No meshes to register with workers");
+				return;
+			}
+
+			try {
+				this._workerPool = new TransformWorkerPool(this._options.workerCount);
+				this._useWorkers = true;
+
+				// Re-register all meshes with new pool
+				for (const mesh of this._meshes) {
+					mesh.registerWithPool(this._workerPool);
+				}
+
+				debugLog(`Workers enabled with ${this._workerPool.workerCount} workers`);
+			} catch (err) {
+				debugWarn("Failed to enable workers:", err);
+				this._useWorkers = false;
+				this._workerPool = null;
+			}
+		}
+	}
+
+	/**
+	 * Get the number of active workers (0 if workers disabled).
+	 */
+	getWorkerCount(): number {
+		return this._workerPool?.workerCount ?? 0;
 	}
 
 	/**
@@ -374,11 +478,48 @@ export class GltfModel {
 	}
 
 	/**
-	 * Update all mesh transforms with a new instance transform matrix.
+	 * Update all mesh transforms synchronously (fallback mode).
+	 */
+	updateTransformSync(matrix: Float32Array): void {
+		for (const mesh of this._meshes) {
+			mesh.updateTransformSync(matrix);
+		}
+	}
+
+	/**
+	 * Update all mesh transforms using worker pool.
+	 * Queues transforms and flushes, awaiting completion.
+	 */
+	async updateTransformAsync(matrix: Float32Array): Promise<void> {
+		if (!this._workerPool || !this._useWorkers) {
+			// Fallback to sync
+			this.updateTransformSync(matrix);
+			return;
+		}
+
+		// Queue transforms for all meshes
+		for (const mesh of this._meshes) {
+			mesh.queueTransform(matrix);
+		}
+
+		// Flush and await results
+		await this._workerPool.flush();
+	}
+
+	/**
+	 * Update all mesh transforms. Uses workers if available, otherwise sync.
+	 * Note: When using workers, this is async but returns immediately.
+	 * Call updateTransformAsync() if you need to await completion.
 	 */
 	updateTransform(matrix: Float32Array): void {
-		for (const mesh of this._meshes) {
-			mesh.updateTransform(matrix);
+		if (this._workerPool && this._useWorkers) {
+			// Queue and flush (fire-and-forget for compatibility)
+			for (const mesh of this._meshes) {
+				mesh.queueTransform(matrix);
+			}
+			this._workerPool.flush(); // Don't await - caller can use updateTransformAsync if needed
+		} else {
+			this.updateTransformSync(matrix);
 		}
 	}
 
@@ -402,6 +543,13 @@ export class GltfModel {
 	 * Release all resources.
 	 */
 	release(renderer: IRenderer): void {
+		// Dispose worker pool first (meshes will unregister during release)
+		if (this._workerPool) {
+			this._workerPool.dispose();
+			this._workerPool = null;
+		}
+		this._useWorkers = false;
+
 		// Release all meshes
 		for (const mesh of this._meshes) {
 			mesh.release();

@@ -20,5 +20,10 @@ C3.Plugins.GltfStatic.Acts =
 	SetScaleXYZ(this: SDKInstanceClass, x: number, y: number, z: number): void
 	{
 		this._setScaleXYZ(x, y, z);
+	},
+
+	SetWorkerEnabled(this: SDKInstanceClass, enabled: number): void
+	{
+		this._setWorkerEnabled(enabled !== 0);
 	}
 };
