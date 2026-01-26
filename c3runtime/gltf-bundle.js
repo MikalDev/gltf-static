@@ -7969,10 +7969,31 @@ var _SharedWorkerPool = class _SharedWorkerPool {
     _SharedWorkerPool._refCount--;
     console.log(`[SharedWorkerPool] Released (refCount: ${_SharedWorkerPool._refCount})`);
     if (_SharedWorkerPool._refCount === 0 && _SharedWorkerPool._instance) {
+      if (_SharedWorkerPool._frameId !== null) {
+        cancelAnimationFrame(_SharedWorkerPool._frameId);
+        _SharedWorkerPool._frameId = null;
+        _SharedWorkerPool._flushScheduled = false;
+      }
       console.log(`[SharedWorkerPool] Disposing shared pool (no more references)`);
       _SharedWorkerPool._instance.dispose();
       _SharedWorkerPool._instance = null;
     }
+  }
+  /**
+   * Schedule a flush for the end of the current frame.
+   * Multiple calls in the same frame are batched into a single flush.
+   * This ensures all models' transforms are sent together.
+   */
+  static scheduleFlush() {
+    if (!_SharedWorkerPool._instance || _SharedWorkerPool._flushScheduled) return;
+    _SharedWorkerPool._flushScheduled = true;
+    _SharedWorkerPool._frameId = requestAnimationFrame(() => {
+      _SharedWorkerPool._flushScheduled = false;
+      _SharedWorkerPool._frameId = null;
+      if (_SharedWorkerPool._instance) {
+        _SharedWorkerPool._instance.flush();
+      }
+    });
   }
   /**
    * Get current reference count (for debugging).
@@ -7989,6 +8010,8 @@ var _SharedWorkerPool = class _SharedWorkerPool {
 };
 _SharedWorkerPool._instance = null;
 _SharedWorkerPool._refCount = 0;
+_SharedWorkerPool._flushScheduled = false;
+_SharedWorkerPool._frameId = null;
 var SharedWorkerPool = _SharedWorkerPool;
 
 // c3runtime/gltf/types.ts
@@ -8518,7 +8541,7 @@ var GltfModel = class {
       for (const mesh of this._meshes) {
         mesh.queueTransform(matrix);
       }
-      this._workerPool.flush();
+      SharedWorkerPool.scheduleFlush();
     } else {
       this.updateTransformSync(matrix);
     }

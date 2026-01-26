@@ -309,12 +309,15 @@ export class TransformWorkerPool {
 }
 
 /**
- * Shared global worker pool with reference counting.
+ * Shared global worker pool with reference counting and per-frame batching.
  * Creates a single pool of ~8 workers shared across all models.
+ * Automatically batches all transform requests per frame using requestAnimationFrame.
  */
 class SharedWorkerPool {
 	private static _instance: TransformWorkerPool | null = null;
 	private static _refCount = 0;
+	private static _flushScheduled = false;
+	private static _frameId: number | null = null;
 
 	/**
 	 * Acquire reference to the shared pool. Creates pool on first call.
@@ -339,10 +342,34 @@ class SharedWorkerPool {
 		console.log(`[SharedWorkerPool] Released (refCount: ${SharedWorkerPool._refCount})`);
 
 		if (SharedWorkerPool._refCount === 0 && SharedWorkerPool._instance) {
+			// Cancel any pending flush
+			if (SharedWorkerPool._frameId !== null) {
+				cancelAnimationFrame(SharedWorkerPool._frameId);
+				SharedWorkerPool._frameId = null;
+				SharedWorkerPool._flushScheduled = false;
+			}
 			console.log(`[SharedWorkerPool] Disposing shared pool (no more references)`);
 			SharedWorkerPool._instance.dispose();
 			SharedWorkerPool._instance = null;
 		}
+	}
+
+	/**
+	 * Schedule a flush for the end of the current frame.
+	 * Multiple calls in the same frame are batched into a single flush.
+	 * This ensures all models' transforms are sent together.
+	 */
+	static scheduleFlush(): void {
+		if (!SharedWorkerPool._instance || SharedWorkerPool._flushScheduled) return;
+
+		SharedWorkerPool._flushScheduled = true;
+		SharedWorkerPool._frameId = requestAnimationFrame(() => {
+			SharedWorkerPool._flushScheduled = false;
+			SharedWorkerPool._frameId = null;
+			if (SharedWorkerPool._instance) {
+				SharedWorkerPool._instance.flush();
+			}
+		});
 	}
 
 	/**

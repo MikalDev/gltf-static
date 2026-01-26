@@ -594,11 +594,12 @@ export class GltfModel {
 		this._lastMatrix.set(matrix);
 
 		if (this._workerPool && this._useWorkers) {
-			// Queue transforms and flush (fire-and-forget, 1-frame latency)
+			// Queue transforms for all meshes
 			for (const mesh of this._meshes) {
 				mesh.queueTransform(matrix);
 			}
-			this._workerPool.flush();
+			// Schedule batched flush - all models' transforms sent together at frame end
+			SharedWorkerPool.scheduleFlush();
 		} else {
 			this.updateTransformSync(matrix);
 		}
