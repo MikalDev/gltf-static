@@ -23,6 +23,9 @@ export class GltfMesh {
 	private _originalPositions: Float32Array | null = null;
 	private _vertexCount: number = 0;
 
+	// Matrix dirty tracking to avoid redundant GPU uploads
+	private _lastMatrix: Float32Array | null = null;
+
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
 	private _isRegisteredWithPool = false;
@@ -71,6 +74,7 @@ export class GltfMesh {
 		// Upload positions (x, y, z per vertex)
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
+		debugLog(`Mesh #${this._id}: markDataChanged("positions") - initial upload`);
 
 		// Upload UVs (u, v per vertex) - default to 0,0 if not present
 		if (texCoords) {
@@ -85,14 +89,17 @@ export class GltfMesh {
 			this._meshData.texCoords.fill(0);
 		}
 		this._meshData.markDataChanged("texCoords", 0, this._vertexCount);
+		debugLog(`Mesh #${this._id}: markDataChanged("texCoords") - initial upload`);
 
 		// Upload indices
 		this._meshData.indices.set(indices);
 		this._meshData.markIndexDataChanged();
+		debugLog(`Mesh #${this._id}: markIndexDataChanged() - initial upload`);
 
 		// Fill vertex colors with white (unlit rendering)
 		this._meshData.fillColor(1, 1, 1, 1);
 		this._meshData.markDataChanged("colors", 0, this._vertexCount);
+		debugLog(`Mesh #${this._id}: markDataChanged("colors") - initial upload`);
 
 		this._texture = texture;
 	}
@@ -131,14 +138,36 @@ export class GltfMesh {
 		if (!this._meshData) return;
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
+		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - worker transform`);
 	}
 
 	/**
-	 * Update vertex positions synchronously (fallback when workers unavailable).
+	 * Check if matrix has changed from last applied matrix.
+	 */
+	private _isMatrixDirty(matrix: Float32Array): boolean {
+		if (!this._lastMatrix) return true;
+		for (let i = 0; i < 16; i++) {
+			if (this._lastMatrix[i] !== matrix[i]) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Update vertex positions synchronously.
+	 * Skips transform if matrix hasn't changed (avoids redundant GPU uploads).
 	 * Uses inline matrix math for performance.
 	 */
 	updateTransformSync(matrix: Float32Array): void {
 		if (!this._meshData || !this._originalPositions) return;
+
+		// Skip if matrix hasn't changed
+		if (!this._isMatrixDirty(matrix)) return;
+
+		// Store copy of matrix for dirty checking
+		if (!this._lastMatrix) {
+			this._lastMatrix = new Float32Array(16);
+		}
+		this._lastMatrix.set(matrix);
 
 		const positions = this._meshData.positions;
 		const original = this._originalPositions;
@@ -162,6 +191,7 @@ export class GltfMesh {
 		}
 
 		this._meshData.markDataChanged("positions", 0, n);
+		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - sync transform`);
 	}
 
 	/**
@@ -170,6 +200,11 @@ export class GltfMesh {
 	 */
 	updateTransform(matrix: Float32Array): void {
 		this.updateTransformSync(matrix);
+	}
+
+	/** Get texture reference for debugging */
+	get texture(): ITexture | null {
+		return this._texture;
 	}
 
 	/**
@@ -211,6 +246,7 @@ export class GltfMesh {
 		}
 		this._texture = null; // Don't delete - Model owns textures
 		this._originalPositions = null;
+		this._lastMatrix = null;
 		this._vertexCount = 0;
 	}
 }

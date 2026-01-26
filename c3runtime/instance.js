@@ -170,7 +170,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
             this._model.draw(renderer);
             const drawTime = performance.now() - drawStart;
             this._lastDrawTime = drawTime;
-            if (shouldLog) {
+            if (false && shouldLog) {
                 debugLog(`Draw #${this._drawCount}:`, {
                     drawTimeMs: drawTime.toFixed(2),
                     position: { x: this.x, y: this.y, z: this.totalZElevation },

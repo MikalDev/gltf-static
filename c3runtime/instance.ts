@@ -228,7 +228,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			const drawTime = performance.now() - drawStart;
 			this._lastDrawTime = drawTime;
 
-			if (shouldLog)
+			if (false &&shouldLog)
 			{
 				debugLog(`Draw #${this._drawCount}:`, {
 					drawTimeMs: drawTime.toFixed(2),

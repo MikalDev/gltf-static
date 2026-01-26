@@ -125,8 +125,9 @@ export class TransformWorkerPool {
 	private _disposed = false;
 
 	constructor(workerCount?: number) {
-		// Default: use available cores minus 1 for main thread, minimum 1
-		this._workerCount = workerCount ?? Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+		// Default: use available cores minus 1 for main thread, minimum 1, maximum 8
+		const defaultCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+		this._workerCount = Math.min(workerCount ?? defaultCount, 8);
 		this._initWorkers();
 	}
 
@@ -306,3 +307,57 @@ export class TransformWorkerPool {
 		this._flushResolvers = [];
 	}
 }
+
+/**
+ * Shared global worker pool with reference counting.
+ * Creates a single pool of ~8 workers shared across all models.
+ */
+class SharedWorkerPool {
+	private static _instance: TransformWorkerPool | null = null;
+	private static _refCount = 0;
+
+	/**
+	 * Acquire reference to the shared pool. Creates pool on first call.
+	 */
+	static acquire(): TransformWorkerPool {
+		if (!SharedWorkerPool._instance) {
+			SharedWorkerPool._instance = new TransformWorkerPool();
+			console.log(`[SharedWorkerPool] Created shared pool with ${SharedWorkerPool._instance.workerCount} workers`);
+		}
+		SharedWorkerPool._refCount++;
+		console.log(`[SharedWorkerPool] Acquired (refCount: ${SharedWorkerPool._refCount})`);
+		return SharedWorkerPool._instance;
+	}
+
+	/**
+	 * Release reference to the shared pool. Disposes pool when last reference released.
+	 */
+	static release(): void {
+		if (SharedWorkerPool._refCount <= 0) return;
+
+		SharedWorkerPool._refCount--;
+		console.log(`[SharedWorkerPool] Released (refCount: ${SharedWorkerPool._refCount})`);
+
+		if (SharedWorkerPool._refCount === 0 && SharedWorkerPool._instance) {
+			console.log(`[SharedWorkerPool] Disposing shared pool (no more references)`);
+			SharedWorkerPool._instance.dispose();
+			SharedWorkerPool._instance = null;
+		}
+	}
+
+	/**
+	 * Get current reference count (for debugging).
+	 */
+	static get refCount(): number {
+		return SharedWorkerPool._refCount;
+	}
+
+	/**
+	 * Check if shared pool exists.
+	 */
+	static get hasInstance(): boolean {
+		return SharedWorkerPool._instance !== null;
+	}
+}
+
+export { SharedWorkerPool };
