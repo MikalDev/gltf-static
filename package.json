@@ -8,7 +8,8 @@
     "build:bundle": "node build.js",
     "build:ts": "tsc",
     "package": "node package.js",
-    "watch": "tsc --watch"
+    "watch": "tsc --watch",
+    "prepare": "husky || true"
   },
   "keywords": [
     "construct3",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "archiver": "^7.0.1",
-    "esbuild": "^0.27.2"
+    "esbuild": "^0.27.2",
+    "husky": "^9.1.7"
   }
 }

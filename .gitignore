@@ -2,8 +2,13 @@
 node_modules/
 
 # TypeScript compiled outputs (built from *.ts)
-c3runtime/gltf/*.js
-editor-gltf-model.js
+# All JS files are generated from TypeScript - do not commit them
+# Exceptions: build scripts and examples
+*.js
+!build.js
+!package.js
+!examples/**/*.js
+!tests/**/*.js
 
 # IDE
 .vscode/

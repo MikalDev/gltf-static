@@ -1,0 +1,9 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+# Build TypeScript files before committing
+npm run build
+
+# Stage any generated JS files (they're gitignored, so this won't actually stage them)
+# This is here for documentation - JS files are now gitignored
+echo "Build completed. Only TypeScript files will be committed."
