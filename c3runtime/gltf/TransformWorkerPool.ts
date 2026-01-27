@@ -7,6 +7,14 @@
  * - Dependency Inversion: Meshes provide callbacks, pool doesn't know about meshData
  */
 
+// Debug logging
+const DEBUG = false;
+const LOG_PREFIX = "[SharedWorkerPool]";
+
+function debugLog(...args: unknown[]): void {
+	if (DEBUG) console.log(LOG_PREFIX, ...args);
+}
+
 // Inline worker code as string for blob URL creation (avoids separate file bundling)
 const WORKER_CODE = `
 const meshCache = new Map();
@@ -113,6 +121,12 @@ interface PendingRequest {
 	matrix: Float32Array;
 }
 
+interface PendingResult {
+	meshIds: Uint32Array;
+	offsets: Uint32Array;
+	positions: Float32Array;
+}
+
 export class TransformWorkerPool {
 	private _workers: Worker[] = [];
 	private _workerBlobUrl: string | null = null;
@@ -120,6 +134,7 @@ export class TransformWorkerPool {
 	private _pendingByWorker: Map<number, PendingRequest[]> = new Map();
 	private _flushResolvers: Array<() => void> = [];
 	private _pendingResponses = 0;
+	private _pendingResults: PendingResult[] = []; // Collect results for batched callback invocation
 	private _nextWorkerIndex = 0;
 	private _workerCount: number;
 	private _disposed = false;
@@ -223,9 +238,37 @@ export class TransformWorkerPool {
 		positions?: Float32Array;
 	}): void {
 		if (msg.type === "TRANSFORM_RESULTS" && msg.positions && msg.meshIds && msg.offsets) {
-			const { meshIds, offsets, positions } = msg;
+			// Collect result for batched processing
+			this._pendingResults.push({
+				meshIds: msg.meshIds,
+				offsets: msg.offsets,
+				positions: msg.positions
+			});
 
-			// Unpack and invoke callbacks
+			// Check if all pending responses received
+			this._pendingResponses--;
+			if (this._pendingResponses === 0) {
+				// All workers responded - invoke all callbacks together (batched RX)
+				this._invokeAllCallbacks();
+
+				// Resolve all waiting flush promises
+				const resolvers = this._flushResolvers;
+				this._flushResolvers = [];
+				for (const resolve of resolvers) {
+					resolve();
+				}
+			}
+		}
+	}
+
+	/**
+	 * Invoke all callbacks from collected results in a single batch.
+	 * This ensures all GPU uploads happen together.
+	 */
+	private _invokeAllCallbacks(): void {
+		for (const result of this._pendingResults) {
+			const { meshIds, offsets, positions } = result;
+
 			for (let i = 0; i < meshIds.length; i++) {
 				const meshId = meshIds[i];
 				const start = offsets[i];
@@ -238,18 +281,10 @@ export class TransformWorkerPool {
 					registration.callback(meshPositions);
 				}
 			}
-
-			// Check if all pending responses received
-			this._pendingResponses--;
-			if (this._pendingResponses === 0) {
-				// Resolve all waiting flush promises
-				const resolvers = this._flushResolvers;
-				this._flushResolvers = [];
-				for (const resolve of resolvers) {
-					resolve();
-				}
-			}
 		}
+
+		// Clear collected results
+		this._pendingResults = [];
 	}
 
 	/**
@@ -299,6 +334,7 @@ export class TransformWorkerPool {
 
 		this._meshRegistry.clear();
 		this._pendingByWorker.clear();
+		this._pendingResults = [];
 
 		// Resolve any pending flushes
 		for (const resolve of this._flushResolvers) {
@@ -311,13 +347,12 @@ export class TransformWorkerPool {
 /**
  * Shared global worker pool with reference counting and per-frame batching.
  * Creates a single pool of ~8 workers shared across all models.
- * Automatically batches all transform requests per frame using requestAnimationFrame.
+ * Batches transform requests per frame via _tick2() flush.
  */
 class SharedWorkerPool {
 	private static _instance: TransformWorkerPool | null = null;
 	private static _refCount = 0;
 	private static _flushScheduled = false;
-	private static _frameId: number | null = null;
 
 	/**
 	 * Acquire reference to the shared pool. Creates pool on first call.
@@ -325,10 +360,10 @@ class SharedWorkerPool {
 	static acquire(): TransformWorkerPool {
 		if (!SharedWorkerPool._instance) {
 			SharedWorkerPool._instance = new TransformWorkerPool();
-			console.log(`[SharedWorkerPool] Created shared pool with ${SharedWorkerPool._instance.workerCount} workers`);
+			debugLog(`Created shared pool with ${SharedWorkerPool._instance.workerCount} workers`);
 		}
 		SharedWorkerPool._refCount++;
-		console.log(`[SharedWorkerPool] Acquired (refCount: ${SharedWorkerPool._refCount})`);
+		debugLog(`Acquired (refCount: ${SharedWorkerPool._refCount})`);
 		return SharedWorkerPool._instance;
 	}
 
@@ -339,37 +374,33 @@ class SharedWorkerPool {
 		if (SharedWorkerPool._refCount <= 0) return;
 
 		SharedWorkerPool._refCount--;
-		console.log(`[SharedWorkerPool] Released (refCount: ${SharedWorkerPool._refCount})`);
+		debugLog(`Released (refCount: ${SharedWorkerPool._refCount})`);
 
 		if (SharedWorkerPool._refCount === 0 && SharedWorkerPool._instance) {
-			// Cancel any pending flush
-			if (SharedWorkerPool._frameId !== null) {
-				cancelAnimationFrame(SharedWorkerPool._frameId);
-				SharedWorkerPool._frameId = null;
-				SharedWorkerPool._flushScheduled = false;
-			}
-			console.log(`[SharedWorkerPool] Disposing shared pool (no more references)`);
+			SharedWorkerPool._flushScheduled = false;
+			debugLog(`Disposing shared pool (no more references)`);
 			SharedWorkerPool._instance.dispose();
 			SharedWorkerPool._instance = null;
 		}
 	}
 
 	/**
-	 * Schedule a flush for the end of the current frame.
-	 * Multiple calls in the same frame are batched into a single flush.
-	 * This ensures all models' transforms are sent together.
+	 * Mark that a flush is needed. Called when transforms are queued.
+	 * Actual flush happens in flushIfPending() called from _tick2().
 	 */
 	static scheduleFlush(): void {
-		if (!SharedWorkerPool._instance || SharedWorkerPool._flushScheduled) return;
-
+		if (!SharedWorkerPool._instance) return;
 		SharedWorkerPool._flushScheduled = true;
-		SharedWorkerPool._frameId = requestAnimationFrame(() => {
-			SharedWorkerPool._flushScheduled = false;
-			SharedWorkerPool._frameId = null;
-			if (SharedWorkerPool._instance) {
-				SharedWorkerPool._instance.flush();
-			}
-		});
+	}
+
+	/**
+	 * Flush pending transforms if any were scheduled.
+	 * Called once per frame from _tick2() after all _tick() calls have queued transforms.
+	 */
+	static flushIfPending(): void {
+		if (!SharedWorkerPool._instance || !SharedWorkerPool._flushScheduled) return;
+		SharedWorkerPool._flushScheduled = false;
+		SharedWorkerPool._instance.flush();
 	}
 
 	/**

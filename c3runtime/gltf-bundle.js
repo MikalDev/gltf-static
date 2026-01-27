@@ -7668,17 +7668,22 @@ var _GltfMesh = class _GltfMesh {
   /**
    * Draw this mesh with its texture.
    * Note: Cull mode is set at model level for performance.
+   * @param renderer The C3 renderer
+   * @param lastTexture The last texture that was bound (undefined = first draw, null = no texture)
+   * @returns The texture used by this mesh (for tracking)
    */
-  draw(renderer) {
-    if (!this._meshData) return;
-    if (this._texture) {
-      renderer.setTextureFillMode();
-      renderer.setTexture(this._texture);
-    } else {
-      renderer.setColorFillMode();
+  draw(renderer, lastTexture = void 0) {
+    if (!this._meshData) return lastTexture === void 0 ? null : lastTexture;
+    if (lastTexture === void 0 || this._texture !== lastTexture) {
+      if (this._texture) {
+        renderer.setTextureFillMode();
+        renderer.setTexture(this._texture);
+      } else {
+        renderer.setColorFillMode();
+      }
     }
-    renderer.resetColor();
     renderer.drawMeshData(this._meshData);
+    return this._texture;
   }
   /**
    * Release GPU resources and unregister from worker pool.
@@ -7705,6 +7710,11 @@ _GltfMesh._nextId = 0;
 var GltfMesh = _GltfMesh;
 
 // c3runtime/gltf/TransformWorkerPool.ts
+var DEBUG2 = false;
+var LOG_PREFIX2 = "[SharedWorkerPool]";
+function debugLog2(...args) {
+  if (DEBUG2) console.log(LOG_PREFIX2, ...args);
+}
 var WORKER_CODE = `
 const meshCache = new Map();
 
@@ -7805,6 +7815,8 @@ var TransformWorkerPool = class {
     this._pendingByWorker = /* @__PURE__ */ new Map();
     this._flushResolvers = [];
     this._pendingResponses = 0;
+    this._pendingResults = [];
+    // Collect results for batched callback invocation
     this._nextWorkerIndex = 0;
     this._disposed = false;
     const defaultCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
@@ -7880,7 +7892,29 @@ var TransformWorkerPool = class {
   }
   _handleMessage(msg) {
     if (msg.type === "TRANSFORM_RESULTS" && msg.positions && msg.meshIds && msg.offsets) {
-      const { meshIds, offsets, positions } = msg;
+      this._pendingResults.push({
+        meshIds: msg.meshIds,
+        offsets: msg.offsets,
+        positions: msg.positions
+      });
+      this._pendingResponses--;
+      if (this._pendingResponses === 0) {
+        this._invokeAllCallbacks();
+        const resolvers = this._flushResolvers;
+        this._flushResolvers = [];
+        for (const resolve of resolvers) {
+          resolve();
+        }
+      }
+    }
+  }
+  /**
+   * Invoke all callbacks from collected results in a single batch.
+   * This ensures all GPU uploads happen together.
+   */
+  _invokeAllCallbacks() {
+    for (const result of this._pendingResults) {
+      const { meshIds, offsets, positions } = result;
       for (let i = 0; i < meshIds.length; i++) {
         const meshId = meshIds[i];
         const start = offsets[i];
@@ -7891,15 +7925,8 @@ var TransformWorkerPool = class {
           registration.callback(meshPositions);
         }
       }
-      this._pendingResponses--;
-      if (this._pendingResponses === 0) {
-        const resolvers = this._flushResolvers;
-        this._flushResolvers = [];
-        for (const resolve of resolvers) {
-          resolve();
-        }
-      }
     }
+    this._pendingResults = [];
   }
   /**
    * Remove a mesh from the pool.
@@ -7942,6 +7969,7 @@ var TransformWorkerPool = class {
     }
     this._meshRegistry.clear();
     this._pendingByWorker.clear();
+    this._pendingResults = [];
     for (const resolve of this._flushResolvers) {
       resolve();
     }
@@ -7955,10 +7983,10 @@ var _SharedWorkerPool = class _SharedWorkerPool {
   static acquire() {
     if (!_SharedWorkerPool._instance) {
       _SharedWorkerPool._instance = new TransformWorkerPool();
-      console.log(`[SharedWorkerPool] Created shared pool with ${_SharedWorkerPool._instance.workerCount} workers`);
+      debugLog2(`Created shared pool with ${_SharedWorkerPool._instance.workerCount} workers`);
     }
     _SharedWorkerPool._refCount++;
-    console.log(`[SharedWorkerPool] Acquired (refCount: ${_SharedWorkerPool._refCount})`);
+    debugLog2(`Acquired (refCount: ${_SharedWorkerPool._refCount})`);
     return _SharedWorkerPool._instance;
   }
   /**
@@ -7967,33 +7995,30 @@ var _SharedWorkerPool = class _SharedWorkerPool {
   static release() {
     if (_SharedWorkerPool._refCount <= 0) return;
     _SharedWorkerPool._refCount--;
-    console.log(`[SharedWorkerPool] Released (refCount: ${_SharedWorkerPool._refCount})`);
+    debugLog2(`Released (refCount: ${_SharedWorkerPool._refCount})`);
     if (_SharedWorkerPool._refCount === 0 && _SharedWorkerPool._instance) {
-      if (_SharedWorkerPool._frameId !== null) {
-        cancelAnimationFrame(_SharedWorkerPool._frameId);
-        _SharedWorkerPool._frameId = null;
-        _SharedWorkerPool._flushScheduled = false;
-      }
-      console.log(`[SharedWorkerPool] Disposing shared pool (no more references)`);
+      _SharedWorkerPool._flushScheduled = false;
+      debugLog2(`Disposing shared pool (no more references)`);
       _SharedWorkerPool._instance.dispose();
       _SharedWorkerPool._instance = null;
     }
   }
   /**
-   * Schedule a flush for the end of the current frame.
-   * Multiple calls in the same frame are batched into a single flush.
-   * This ensures all models' transforms are sent together.
+   * Mark that a flush is needed. Called when transforms are queued.
+   * Actual flush happens in flushIfPending() called from _tick2().
    */
   static scheduleFlush() {
-    if (!_SharedWorkerPool._instance || _SharedWorkerPool._flushScheduled) return;
+    if (!_SharedWorkerPool._instance) return;
     _SharedWorkerPool._flushScheduled = true;
-    _SharedWorkerPool._frameId = requestAnimationFrame(() => {
-      _SharedWorkerPool._flushScheduled = false;
-      _SharedWorkerPool._frameId = null;
-      if (_SharedWorkerPool._instance) {
-        _SharedWorkerPool._instance.flush();
-      }
-    });
+  }
+  /**
+   * Flush pending transforms if any were scheduled.
+   * Called once per frame from _tick2() after all _tick() calls have queued transforms.
+   */
+  static flushIfPending() {
+    if (!_SharedWorkerPool._instance || !_SharedWorkerPool._flushScheduled) return;
+    _SharedWorkerPool._flushScheduled = false;
+    _SharedWorkerPool._instance.flush();
   }
   /**
    * Get current reference count (for debugging).
@@ -8011,14 +8036,13 @@ var _SharedWorkerPool = class _SharedWorkerPool {
 _SharedWorkerPool._instance = null;
 _SharedWorkerPool._refCount = 0;
 _SharedWorkerPool._flushScheduled = false;
-_SharedWorkerPool._frameId = null;
 var SharedWorkerPool = _SharedWorkerPool;
 
 // c3runtime/gltf/types.ts
-var DEBUG2 = true;
-var LOG_PREFIX2 = "[ModelCache]";
-function debugLog2(...args) {
-  if (DEBUG2) console.log(LOG_PREFIX2, ...args);
+var DEBUG3 = true;
+var LOG_PREFIX3 = "[ModelCache]";
+function debugLog3(...args) {
+  if (DEBUG3) console.log(LOG_PREFIX3, ...args);
 }
 var ModelCacheImpl = class {
   constructor() {
@@ -8049,14 +8073,14 @@ var ModelCacheImpl = class {
   set(url, data) {
     this._cache.set(url, data);
     this._loading.delete(url);
-    debugLog2(`Cached model: ${url} (${data.textureMap.size} textures, refCount=${data.refCount})`);
+    debugLog3(`Cached model: ${url} (${data.textureMap.size} textures, refCount=${data.refCount})`);
   }
   /** Increment ref count and return data */
   acquire(url) {
     const data = this._cache.get(url);
     if (data) {
       data.refCount++;
-      debugLog2(`Acquired cached model: ${url} (refCount=${data.refCount}, sharing ${data.textureMap.size} textures)`);
+      debugLog3(`Acquired cached model: ${url} (refCount=${data.refCount}, sharing ${data.textureMap.size} textures)`);
     }
     return data;
   }
@@ -8065,9 +8089,9 @@ var ModelCacheImpl = class {
     const data = this._cache.get(url);
     if (!data) return;
     data.refCount--;
-    debugLog2(`Released cached model: ${url} (refCount=${data.refCount})`);
+    debugLog3(`Released cached model: ${url} (refCount=${data.refCount})`);
     if (data.refCount <= 0) {
-      debugLog2(`Deleting ${data.textureMap.size} cached textures for: ${url}`);
+      debugLog3(`Deleting ${data.textureMap.size} cached textures for: ${url}`);
       for (const texture of data.textureMap.values()) {
         renderer.deleteTexture(texture);
       }
@@ -8089,15 +8113,16 @@ var ModelCacheImpl = class {
 var modelCache = new ModelCacheImpl();
 
 // c3runtime/gltf/GltfModel.ts
-var DEBUG3 = true;
-var LOG_PREFIX3 = "[GltfModel]";
-function debugLog3(...args) {
-  if (DEBUG3) console.log(LOG_PREFIX3, ...args);
+var DEBUG4 = true;
+var LOG_PREFIX4 = "[GltfModel]";
+function debugLog4(...args) {
+  if (DEBUG4) console.log(LOG_PREFIX4, ...args);
 }
 function debugWarn(...args) {
-  if (DEBUG3) console.warn(LOG_PREFIX3, ...args);
+  if (DEBUG4) console.warn(LOG_PREFIX4, ...args);
 }
 var GLTF_TRIANGLES = 4;
+var lastCullModeFrame = -1;
 var GltfModel = class {
   constructor() {
     this._textures = [];
@@ -8143,26 +8168,26 @@ var GltfModel = class {
    * @param options Optional configuration for worker pool
    */
   async load(renderer, url, options) {
-    debugLog3("Loading glTF from:", url);
+    debugLog4("Loading glTF from:", url);
     const loadStart = performance.now();
     this._options = options || {};
     this._cachedUrl = url;
     let cached = modelCache.get(url);
     if (cached) {
-      debugLog3("*** CACHE HIT *** Using cached model data for:", url);
+      debugLog4("*** CACHE HIT *** Using cached model data for:", url);
       modelCache.acquire(url);
       await this._loadFromCache(renderer, cached, loadStart);
       return;
     }
     const loadingPromise = modelCache.getLoading(url);
     if (loadingPromise) {
-      debugLog3("*** WAITING *** Another instance is loading:", url);
+      debugLog4("*** WAITING *** Another instance is loading:", url);
       cached = await loadingPromise;
       modelCache.acquire(url);
       await this._loadFromCache(renderer, cached, loadStart);
       return;
     }
-    debugLog3("*** FRESH LOAD *** No cache, loading:", url);
+    debugLog4("*** FRESH LOAD *** No cache, loading:", url);
     const loadPromise = this._loadFresh(renderer, url);
     modelCache.setLoading(url, loadPromise);
     try {
@@ -8178,17 +8203,17 @@ var GltfModel = class {
    * Load fresh document and textures into cache.
    */
   async _loadFresh(renderer, url) {
-    debugLog3("Fetching and parsing glTF document...");
+    debugLog4("Fetching and parsing glTF document...");
     const fetchStart = performance.now();
     const io = new WebIO();
     const document = await io.read(url);
     const root = document.getRoot();
-    debugLog3(`Document parsed in ${(performance.now() - fetchStart).toFixed(0)}ms`);
-    debugLog3("Loading textures...");
+    debugLog4(`Document parsed in ${(performance.now() - fetchStart).toFixed(0)}ms`);
+    debugLog4("Loading textures...");
     const textureStart = performance.now();
     const loadedTextures = [];
     const textureMap = await this._loadTextures(renderer, root, loadedTextures);
-    debugLog3(`${loadedTextures.length} textures loaded in ${(performance.now() - textureStart).toFixed(0)}ms`);
+    debugLog4(`${loadedTextures.length} textures loaded in ${(performance.now() - textureStart).toFixed(0)}ms`);
     return {
       url,
       document,
@@ -8200,30 +8225,30 @@ var GltfModel = class {
    * Load meshes from cached document/textures.
    */
   async _loadFromCache(renderer, cached, loadStart) {
-    debugLog3("_loadFromCache: Creating meshes from cached document/textures");
+    debugLog4("_loadFromCache: Creating meshes from cached document/textures");
     const loadedMeshes = [];
     this._totalVertices = 0;
     this._totalIndices = 0;
     try {
-      debugLog3("Processing nodes and meshes...");
+      debugLog4("Processing nodes and meshes...");
       const meshStart = performance.now();
       const root = cached.document.getRoot();
       const identityMatrix = mat4_exports.create();
       const sceneList = root.listScenes();
-      debugLog3(`Found ${sceneList.length} scene(s)`);
+      debugLog4(`Found ${sceneList.length} scene(s)`);
       for (const scene of sceneList) {
         const children = scene.listChildren();
-        debugLog3(`Scene has ${children.length} root node(s)`);
+        debugLog4(`Scene has ${children.length} root node(s)`);
         for (const node of children) {
           this._processNode(renderer, node, cached.textureMap, identityMatrix, loadedMeshes);
         }
       }
-      debugLog3(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
+      debugLog4(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
       this._textures = [...cached.textureMap.values()];
       this._meshes = loadedMeshes;
       this._isLoaded = true;
       this._setupWorkerPool();
-      debugLog3(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
+      debugLog4(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
         meshes: this._meshes.length,
         textures: this._textures.length,
         vertices: this._totalVertices,
@@ -8245,7 +8270,7 @@ var GltfModel = class {
    */
   _setupWorkerPool() {
     if (this._options.useWorkers === false) {
-      debugLog3("Worker pool explicitly disabled");
+      debugLog4("Worker pool explicitly disabled");
       this._useWorkers = false;
       return;
     }
@@ -8255,7 +8280,7 @@ var GltfModel = class {
       for (const mesh of this._meshes) {
         mesh.registerWithPool(this._workerPool);
       }
-      debugLog3(`Using shared worker pool (${this._workerPool.workerCount} workers), ${this._meshes.length} meshes registered`);
+      debugLog4(`Using shared worker pool (${this._workerPool.workerCount} workers), ${this._meshes.length} meshes registered`);
     } catch (err) {
       debugWarn("Failed to acquire shared worker pool, falling back to sync transforms:", err);
       this._useWorkers = false;
@@ -8275,10 +8300,10 @@ var GltfModel = class {
         this._workerPool = null;
       }
       this._useWorkers = false;
-      debugLog3("Workers disabled");
+      debugLog4("Workers disabled");
     } else {
       if (this._meshes.length === 0) {
-        debugLog3("No meshes to register with workers");
+        debugLog4("No meshes to register with workers");
         return;
       }
       try {
@@ -8287,7 +8312,7 @@ var GltfModel = class {
         for (const mesh of this._meshes) {
           mesh.registerWithPool(this._workerPool);
         }
-        debugLog3(`Workers enabled using shared pool (${this._workerPool.workerCount} workers)`);
+        debugLog4(`Workers enabled using shared pool (${this._workerPool.workerCount} workers)`);
       } catch (err) {
         debugWarn("Failed to enable workers:", err);
         this._useWorkers = false;
@@ -8307,7 +8332,7 @@ var GltfModel = class {
   async _loadTextures(renderer, root, loadedTextures) {
     const map = /* @__PURE__ */ new Map();
     const textureList = root.listTextures();
-    debugLog3(`Found ${textureList.length} texture(s) in document`);
+    debugLog4(`Found ${textureList.length} texture(s) in document`);
     let textureIndex = 0;
     for (const texture of textureList) {
       const imageData = texture.getImage();
@@ -8315,7 +8340,7 @@ var GltfModel = class {
         const mimeType = texture.getMimeType() || "image/png";
         const blob = new Blob([imageData], { type: mimeType });
         const bitmap = await createImageBitmap(blob);
-        debugLog3(`Texture ${textureIndex}: ${bitmap.width}x${bitmap.height} (${mimeType}, ${imageData.byteLength} bytes)`);
+        debugLog4(`Texture ${textureIndex}: ${bitmap.width}x${bitmap.height} (${mimeType}, ${imageData.byteLength} bytes)`);
         try {
           const c3Texture = await renderer.createStaticTexture(bitmap, {
             sampling: "bilinear",
@@ -8341,14 +8366,14 @@ var GltfModel = class {
   _processNode(renderer, nodeDef, textureMap, parentMatrix, loadedMeshes, depth = 0) {
     const nodeName = nodeDef.getName() || "(unnamed)";
     const indent = "  ".repeat(depth);
-    debugLog3(`${indent}Processing node: "${nodeName}"`);
+    debugLog4(`${indent}Processing node: "${nodeName}"`);
     const localMatrix = this._getLocalMatrix(nodeDef);
     const worldMatrix = mat4_exports.create();
     mat4_exports.multiply(worldMatrix, parentMatrix, localMatrix);
     const mesh = nodeDef.getMesh();
     if (mesh) {
       const primitives = mesh.listPrimitives();
-      debugLog3(`${indent}  Mesh has ${primitives.length} primitive(s)`);
+      debugLog4(`${indent}  Mesh has ${primitives.length} primitive(s)`);
       for (const primitive of primitives) {
         const mode = primitive.getMode();
         if (mode !== GLTF_TRIANGLES && mode !== void 0) {
@@ -8368,7 +8393,7 @@ var GltfModel = class {
     }
     const children = nodeDef.listChildren();
     if (children.length > 0) {
-      debugLog3(`${indent}  ${children.length} child node(s)`);
+      debugLog4(`${indent}  ${children.length} child node(s)`);
     }
     for (const child of children) {
       this._processNode(renderer, child, textureMap, worldMatrix, loadedMeshes, depth + 1);
@@ -8408,7 +8433,7 @@ var GltfModel = class {
         minV = Math.min(minV, texCoords[i + 1]);
         maxV = Math.max(maxV, texCoords[i + 1]);
       }
-      debugLog3(`    UV range: U[${minU.toFixed(2)}-${maxU.toFixed(2)}], V[${minV.toFixed(2)}-${maxV.toFixed(2)}]`);
+      debugLog4(`    UV range: U[${minU.toFixed(2)}-${maxU.toFixed(2)}], V[${minV.toFixed(2)}-${maxV.toFixed(2)}]`);
     }
     let indices;
     if (indicesArray instanceof Uint16Array || indicesArray instanceof Uint32Array) {
@@ -8423,7 +8448,7 @@ var GltfModel = class {
     const triangleCount = indexCount / 3;
     this._totalVertices += vertexCount;
     this._totalIndices += indexCount;
-    debugLog3(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}`);
+    debugLog4(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}`);
     positions = this._transformPositions(positions, worldMatrix);
     let texture = null;
     const material = primitive.getMaterial();
@@ -8432,7 +8457,7 @@ var GltfModel = class {
       if (baseColorTex) {
         texture = textureMap.get(baseColorTex) || null;
         if (texture) {
-          debugLog3(`    Texture assigned from material`);
+          debugLog4(`    Texture assigned from material`);
         } else {
           debugWarn(`    Material has texture but not found in map`);
         }
@@ -8548,14 +8573,18 @@ var GltfModel = class {
   }
   /**
    * Draw all meshes.
+   * @param renderer The C3 renderer
+   * @param frameId Current frame number (used to set cull mode once per frame)
    */
-  draw(renderer) {
-    const prevCullMode = renderer.getCullFaceMode();
-    renderer.setCullFaceMode("back");
-    for (const mesh of this._meshes) {
-      mesh.draw(renderer);
+  draw(renderer, frameId = 0) {
+    if (frameId !== lastCullModeFrame) {
+      renderer.setCullFaceMode("back");
+      lastCullModeFrame = frameId;
     }
-    renderer.setCullFaceMode(prevCullMode);
+    let lastTexture = void 0;
+    for (const mesh of this._meshes) {
+      lastTexture = mesh.draw(renderer, lastTexture);
+    }
   }
   /**
    * Release all resources.
@@ -8582,10 +8611,11 @@ var GltfModel = class {
 };
 
 // c3runtime/gltf/index.ts
-globalThis.GltfBundle = { GltfModel, GltfMesh, TransformWorkerPool, modelCache, mat4: mat4_exports, vec3: vec3_exports, quat: quat_exports };
+globalThis.GltfBundle = { GltfModel, GltfMesh, TransformWorkerPool, SharedWorkerPool, modelCache, mat4: mat4_exports, vec3: vec3_exports, quat: quat_exports };
 export {
   GltfMesh,
   GltfModel,
+  SharedWorkerPool,
   TransformWorkerPool,
   mat4_exports as mat4,
   modelCache,

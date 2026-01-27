@@ -210,21 +210,25 @@ export class GltfMesh {
 	/**
 	 * Draw this mesh with its texture.
 	 * Note: Cull mode is set at model level for performance.
+	 * @param renderer The C3 renderer
+	 * @param lastTexture The last texture that was bound (undefined = first draw, null = no texture)
+	 * @returns The texture used by this mesh (for tracking)
 	 */
-	draw(renderer: IRenderer): void {
-		if (!this._meshData) return;
+	draw(renderer: IRenderer, lastTexture: ITexture | null | undefined = undefined): ITexture | null {
+		if (!this._meshData) return lastTexture === undefined ? null : lastTexture;
 
-		if (this._texture) {
-			// Textured rendering
-			renderer.setTextureFillMode();
-			renderer.setTexture(this._texture);
-		} else {
-			// Solid color rendering when no texture
-			renderer.setColorFillMode();
+		// Only change texture/fill mode if different from last (undefined means first draw)
+		if (lastTexture === undefined || this._texture !== lastTexture) {
+			if (this._texture) {
+				renderer.setTextureFillMode();
+				renderer.setTexture(this._texture);
+			} else {
+				renderer.setColorFillMode();
+			}
 		}
 
-		renderer.resetColor();
 		renderer.drawMeshData(this._meshData);
+		return this._texture;
 	}
 
 	/**

@@ -1,18 +1,20 @@
 // Import types only (not runtime values) for TypeScript checking
 import type { GltfModel as GltfModelType } from "./gltf/GltfModel.js";
+import type { SharedWorkerPool as SharedWorkerPoolType } from "./gltf/TransformWorkerPool.js";
 import type { mat4 as mat4Type, vec3 as vec3Type } from "gl-matrix";
 
 // Augment globalThis with GltfBundle type
 declare global {
 	var GltfBundle: {
 		GltfModel: typeof GltfModelType;
+		SharedWorkerPool: typeof SharedWorkerPoolType;
 		mat4: typeof mat4Type;
 		vec3: typeof vec3Type;
 	};
 }
 
 // Access bundle from globalThis (C3 worker compatible - no ES module import)
-const { GltfModel, mat4, vec3 } = globalThis.GltfBundle;
+const { GltfModel, SharedWorkerPool, mat4, vec3 } = globalThis.GltfBundle;
 
 // Debug logging - set to false to disable
 const DEBUG = true;
@@ -77,6 +79,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	// Debug stats
 	_drawCount: number = 0;
 	_lastDrawTime: number = 0;
+	_tickCount: number = 0;
+	_transformUpdateCount: number = 0;
 
 	constructor()
 	{
@@ -118,6 +122,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	{
 		debugLog("_release called, total draws:", this._drawCount);
 
+		// Stop ticking
+		this._setTicking(false);
+		this._setTicking2(false);
+
 		// Clean up glTF model resources
 		if (this._model)
 		{
@@ -125,6 +133,24 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			this._model = null;
 			debugLog("Model resources released");
 		}
+	}
+
+	/**
+	 * Whether this instance renders to its own Z plane.
+	 * Returns false to use standard layer Z ordering.
+	 */
+	_rendersToOwnZPlane(): boolean
+	{
+		return false;
+	}
+
+	/**
+	 * Whether this instance must be pre-drawn before other instances.
+	 * Returns false for standard draw order.
+	 */
+	_mustPreDraw(): boolean
+	{
+		return false;
 	}
 
 	/**
@@ -203,6 +229,38 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		return tempMatrix as Float32Array;
 	}
 
+	/**
+	 * Called once per frame when ticking is enabled.
+	 * Handles transform updates separately from rendering.
+	 */
+	_tick(): void
+	{
+		this._tickCount++;
+		if (!this._model?.isLoaded) return;
+
+		// Only update if transform changed
+		if (this._isTransformDirty())
+		{
+			this._transformUpdateCount++;
+			const matrix = this._buildTransformMatrix();
+			this._model.updateTransform(matrix);
+
+			// Log every 60 ticks to monitor transform activity
+			if (this._transformUpdateCount % 60 === 1)
+			{
+				debugLog(`Transform update #${this._transformUpdateCount} at tick #${this._tickCount}`);
+			}
+		}
+	}
+
+	/**
+	 * Called after all _tick() calls. Flushes pending worker transforms.
+	 */
+	_tick2(): void
+	{
+		SharedWorkerPool.flushIfPending();
+	}
+
 	_draw(renderer: IRenderer): void
 	{
 		const drawStart = performance.now();
@@ -214,29 +272,12 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Draw the glTF model if loaded
 		if (this._model?.isLoaded)
 		{
-			// Update mesh positions if transform changed
-			if (this._isTransformDirty())
-			{
-				if (shouldLog) debugLog("Transform dirty, rebuilding matrix");
-				const matrix = this._buildTransformMatrix();
-				this._model.updateTransform(matrix);
-			}
-
-			// Draw the model
-			this._model.draw(renderer);
+			// Just render - transform updates happen in _tick()
+			// Pass tickCount so cull mode is only set once per frame
+			this._model.draw(renderer, this.runtime.tickCount);
 
 			const drawTime = performance.now() - drawStart;
 			this._lastDrawTime = drawTime;
-
-			if (false &&shouldLog)
-			{
-				debugLog(`Draw #${this._drawCount}:`, {
-					drawTimeMs: drawTime.toFixed(2),
-					position: { x: this.x, y: this.y, z: this.totalZElevation },
-					size: { width: this.width, height: this.height },
-					rotation: { x: this._rotationX, y: this._rotationY, z: this._rotationZ, angle: this.angle }
-				});
-			}
 		}
 		else
 		{
@@ -409,6 +450,17 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				url,
 				...stats
 			});
+
+			// Start ticking to process transforms each frame
+			if (!this._isTicking())
+			{
+				this._setTicking(true);
+			}
+			// Enable tick2 to flush worker transforms after all tick() calls
+			if (!this._isTicking2())
+			{
+				this._setTicking2(true);
+			}
 
 			// Trigger "On Loaded" condition
 			this._trigger(C3.Plugins.GltfStatic.Cnds.OnLoaded);

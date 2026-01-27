@@ -19,6 +19,9 @@ function debugWarn(...args: unknown[]): void {
 // glTF primitive modes
 const GLTF_TRIANGLES = 4;
 
+// Track last frame cull mode was set (avoid redundant state changes across models)
+let lastCullModeFrame = -1;
+
 /** Stats about a loaded model */
 export interface GltfModelStats {
 	nodeCount: number;
@@ -607,18 +610,22 @@ export class GltfModel {
 
 	/**
 	 * Draw all meshes.
+	 * @param renderer The C3 renderer
+	 * @param frameId Current frame number (used to set cull mode once per frame)
 	 */
-	draw(renderer: IRenderer): void {
-		// Set cull mode once for all meshes (performance optimization)
-		const prevCullMode = renderer.getCullFaceMode();
-		renderer.setCullFaceMode("back");
-
-		for (const mesh of this._meshes) {
-			mesh.draw(renderer);
+	draw(renderer: IRenderer, frameId: number = 0): void {
+		// Set cull mode once per frame (not per model)
+		if (frameId !== lastCullModeFrame) {
+			renderer.setCullFaceMode("back");
+			lastCullModeFrame = frameId;
 		}
 
-		// Restore previous cull mode
-		renderer.setCullFaceMode(prevCullMode);
+		// Track last texture to avoid redundant state changes
+		// undefined = first draw (forces state setup), null = no texture
+		let lastTexture: ITexture | null | undefined = undefined;
+		for (const mesh of this._meshes) {
+			lastTexture = mesh.draw(renderer, lastTexture);
+		}
 	}
 
 	/**
