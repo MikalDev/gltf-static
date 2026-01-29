@@ -600,10 +600,10 @@ export class AnimationController {
 
 		// Handle edge cases: before first or after last keyframe
 		if (time <= times[0]) {
-			return this._extractValue(values, 0, valueSize);
+			return this._extractValueInto(values, 0, valueSize, "A");
 		}
 		if (time >= times[times.length - 1]) {
-			return this._extractValue(values, times.length - 1, valueSize);
+			return this._extractValueInto(values, times.length - 1, valueSize, "A");
 		}
 
 		// Find keyframe index (linear search - could optimize with binary search for long tracks)
@@ -616,9 +616,9 @@ export class AnimationController {
 		const t1 = times[i + 1];
 		const factor = (time - t0) / (t1 - t0);
 
-		// Get values at keyframes
-		const v0 = this._extractValue(values, i, valueSize);
-		const v1 = this._extractValue(values, i + 1, valueSize);
+		// Get values at keyframes (use different buffers to avoid overwrite!)
+		const v0 = this._extractValueInto(values, i, valueSize, "A");
+		const v1 = this._extractValueInto(values, i + 1, valueSize, "B");
 
 		if (!v0 || !v1) return null;
 
@@ -644,23 +644,26 @@ export class AnimationController {
 	}
 
 	/**
-	 * Extract a value from the output array at a given keyframe index.
+	 * Extract a value from the output array at a given keyframe index into specified buffer.
+	 * @param target The buffer to write into (A or B)
 	 */
-	private _extractValue(values: Float32Array, index: number, size: number): Float32Array | null {
+	private _extractValueInto(values: Float32Array, index: number, size: number, target: "A" | "B"): Float32Array | null {
 		const offset = index * size;
 		if (offset + size > values.length) return null;
 
 		if (size === 4) {
-			this._tempQuatA[0] = values[offset];
-			this._tempQuatA[1] = values[offset + 1];
-			this._tempQuatA[2] = values[offset + 2];
-			this._tempQuatA[3] = values[offset + 3];
-			return this._tempQuatA;
+			const buf = target === "A" ? this._tempQuatA : this._tempQuatB;
+			buf[0] = values[offset];
+			buf[1] = values[offset + 1];
+			buf[2] = values[offset + 2];
+			buf[3] = values[offset + 3];
+			return buf;
 		} else {
-			this._tempVec3A[0] = values[offset];
-			this._tempVec3A[1] = values[offset + 1];
-			this._tempVec3A[2] = values[offset + 2];
-			return this._tempVec3A;
+			const buf = target === "A" ? this._tempVec3A : this._tempVec3B;
+			buf[0] = values[offset];
+			buf[1] = values[offset + 1];
+			buf[2] = values[offset + 2];
+			return buf;
 		}
 	}
 
