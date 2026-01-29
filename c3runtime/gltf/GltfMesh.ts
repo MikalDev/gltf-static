@@ -241,6 +241,28 @@ export class GltfMesh {
 		this.updateTransformSync(matrix);
 	}
 
+	/**
+	 * Update GPU positions from skinned vertex data.
+	 * Used by AnimationController to push skinned positions to GPU.
+	 * @param positions Skinned vertex positions (Float32Array, 3 floats per vertex)
+	 */
+	updateSkinnedPositions(positions: Float32Array): void {
+		if (!this._meshData) return;
+
+		// Verify length matches
+		if (positions.length !== this._vertexCount * 3) {
+			console.warn(`${LOG_PREFIX} Mesh #${this._id}: Position array length mismatch (expected ${this._vertexCount * 3}, got ${positions.length})`);
+			return;
+		}
+
+		this._meshData.positions.set(positions);
+		this._meshData.markDataChanged("positions", 0, this._vertexCount);
+		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - skinned positions`);
+
+		// Clear last matrix since we're using raw positions now
+		this._lastMatrix = null;
+	}
+
 	/** Get texture reference for debugging */
 	get texture(): ITexture | null {
 		return this._texture;

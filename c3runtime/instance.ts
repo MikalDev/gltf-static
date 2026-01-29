@@ -1,13 +1,17 @@
 // Import types only (not runtime values) for TypeScript checking
 import type { GltfModel as GltfModelType } from "./gltf/GltfModel.js";
+import type { GltfMesh as GltfMeshType } from "./gltf/GltfMesh.js";
 import type { SharedWorkerPool as SharedWorkerPoolType } from "./gltf/TransformWorkerPool.js";
+import type { AnimationController as AnimationControllerType } from "./gltf/AnimationController.js";
 import type { mat4 as mat4Type, vec3 as vec3Type, quat as quatType } from "gl-matrix";
 
 // Augment globalThis with GltfBundle type
 declare global {
 	var GltfBundle: {
 		GltfModel: typeof GltfModelType;
+		GltfMesh: typeof GltfMeshType;
 		SharedWorkerPool: typeof SharedWorkerPoolType;
+		AnimationController: typeof AnimationControllerType;
 		mat4: typeof mat4Type;
 		vec3: typeof vec3Type;
 		quat: typeof quatType;
@@ -15,7 +19,7 @@ declare global {
 }
 
 // Access bundle from globalThis (C3 worker compatible - no ES module import)
-const { GltfModel, SharedWorkerPool, mat4, vec3 } = globalThis.GltfBundle;
+const { GltfModel, GltfMesh, SharedWorkerPool, AnimationController, mat4, vec3 } = globalThis.GltfBundle;
 
 // Debug logging - set to false to disable
 const DEBUG = false;
@@ -76,6 +80,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_model: GltfModelType | null = null;
 	_isLoading: boolean = false;
 
+	// Animation controller (created when model has skinning data)
+	_animationController: AnimationControllerType | null = null;
+	_skinnedMeshIndices: number[] = [];  // Maps animation controller mesh index to model mesh index
+
 	_realRuntime: unknown
 
 	// Debug stats
@@ -126,6 +134,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Stop ticking
 		this._setTicking(false);
 		this._setTicking2(false);
+
+		// Clean up animation controller
+		this._animationController = null;
 
 		// Clean up glTF model resources
 		if (this._model)
@@ -201,12 +212,44 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 	/**
 	 * Called once per frame when ticking is enabled.
-	 * No CPU vertex transforms — just ensures C3 redraws when model is loaded.
+	 * Updates animation and ensures C3 redraws when model is loaded.
 	 */
 	_tick(): void
 	{
 		if (!this._model?.isLoaded) return;
+
+		// Update animation if playing (use C3 SDK's delta time)
+		if (this._animationController?.isPlaying())
+		{
+			this._animationController.update(this.runtime.dt);
+
+			// Push skinned positions to GPU
+			this._updateSkinnedMeshes();
+		}
+
 		this.runtime.sdk.updateRender();
+	}
+
+	/**
+	 * Push skinned positions from animation controller to mesh GPU buffers.
+	 */
+	_updateSkinnedMeshes(): void
+	{
+		if (!this._animationController || !this._model) return;
+
+		const meshes = this._model.meshes;
+		if (!meshes) return;
+
+		// Use _skinnedMeshIndices to map animation controller index to actual mesh index
+		for (let i = 0; i < this._animationController.getMeshCount(); i++)
+		{
+			const meshIndex = this._skinnedMeshIndices[i];
+			const positions = this._animationController.getSkinnedPositions(i);
+			if (meshes[meshIndex])
+			{
+				meshes[meshIndex].updateSkinnedPositions(positions);
+			}
+		}
 	}
 
 	/**
@@ -376,6 +419,208 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		return this._model?.getStats().meshCount ?? 0;
 	}
 
+	// ========================================================================
+	// Animation Control Methods
+	// ========================================================================
+
+	/**
+	 * Create animation controller after model loads (if model has skinning data).
+	 */
+	_createAnimationController(): void
+	{
+		if (!this._model || this._animationController) return;
+
+		// Check if model has skinning data
+		if (!this._model.hasSkinning || this._model.animations.length === 0)
+		{
+			modelLoadLog("Model has no skinning data or animations, skipping animation controller");
+			return;
+		}
+
+		const skins = this._model.skins;
+		if (skins.length === 0) return;
+
+		const meshes = this._model.meshes;
+		if (!meshes || meshes.length === 0) return;
+
+		// Build mesh data for animation controller and track skinned mesh indices
+		const animMeshes: { originalPositions: Float32Array; skinningData: any }[] = [];
+		this._skinnedMeshIndices = [];
+		for (let i = 0; i < meshes.length; i++)
+		{
+			const mesh = meshes[i];
+			if (mesh.isSkinned && mesh.originalPositions && mesh.skinningData)
+			{
+				this._skinnedMeshIndices.push(i);
+				animMeshes.push({
+					originalPositions: mesh.originalPositions,
+					skinningData: mesh.skinningData
+				});
+			}
+		}
+
+		if (animMeshes.length === 0)
+		{
+			modelLoadLog("No skinned meshes found, skipping animation controller");
+			return;
+		}
+
+		try
+		{
+			this._animationController = new AnimationController({
+				skinData: skins[0], // Use first skin
+				animations: [...this._model.animations],
+				meshes: animMeshes
+			});
+
+			// Set up onComplete callback to trigger condition
+			this._animationController.onComplete = () =>
+			{
+				this._trigger(C3.Plugins.GltfStatic.Cnds.OnAnimationFinished);
+			};
+
+			modelLoadLog(`Animation controller created with ${this._model.animations.length} animations, ${animMeshes.length} skinned meshes`);
+		}
+		catch (err)
+		{
+			debugError("Failed to create animation controller:", err);
+			this._animationController = null;
+		}
+	}
+
+	_playAnimation(name: string): void
+	{
+		if (!this._animationController)
+		{
+			debugWarn("No animation controller - model may not have animations");
+			return;
+		}
+		this._animationController.play(name);
+	}
+
+	_playAnimationByIndex(index: number): void
+	{
+		if (!this._animationController)
+		{
+			debugWarn("No animation controller - model may not have animations");
+			return;
+		}
+		this._animationController.playByIndex(index);
+	}
+
+	_stopAnimation(): void
+	{
+		this._animationController?.stop();
+	}
+
+	_pauseAnimation(): void
+	{
+		this._animationController?.pause();
+	}
+
+	_resumeAnimation(): void
+	{
+		this._animationController?.resume();
+	}
+
+	_setAnimationTime(time: number): void
+	{
+		this._animationController?.setTime(time);
+	}
+
+	_setAnimationSpeed(speed: number): void
+	{
+		if (this._animationController)
+		{
+			this._animationController.playbackRate = speed;
+		}
+	}
+
+	_setAnimationLoop(loop: boolean): void
+	{
+		if (this._animationController)
+		{
+			this._animationController.loop = loop;
+		}
+	}
+
+	_isAnimationPlaying(): boolean
+	{
+		return this._animationController?.isPlaying() ?? false;
+	}
+
+	_isAnimationPaused(): boolean
+	{
+		return this._animationController?.isPaused() ?? false;
+	}
+
+	_getAnimationTime(): number
+	{
+		return this._animationController?.getTime() ?? 0;
+	}
+
+	_getAnimationDuration(): number
+	{
+		return this._animationController?.getDuration() ?? 0;
+	}
+
+	_getAnimationName(): string
+	{
+		return this._animationController?.getCurrentAnimation() ?? "";
+	}
+
+	_getAnimationCount(): number
+	{
+		return this._animationController?.getAnimationCount() ?? this._model?.animations.length ?? 0;
+	}
+
+	_getAnimationNameAt(index: number): string
+	{
+		if (this._animationController)
+		{
+			return this._animationController.getAnimationNameAt(index);
+		}
+		// Fallback to model data if no controller yet
+		const anims = this._model?.animations;
+		if (anims && index >= 0 && index < anims.length)
+		{
+			return anims[index].name;
+		}
+		return "";
+	}
+
+	_getAnimationSpeed(): number
+	{
+		return this._animationController?.playbackRate ?? 1;
+	}
+
+	_getAnimationProgress(): number
+	{
+		return this._animationController?.getNormalizedTime() ?? 0;
+	}
+
+	_hasAnimation(name: string): boolean
+	{
+		if (this._animationController)
+		{
+			return this._animationController.hasAnimation(name);
+		}
+		// Fallback to model data
+		const anims = this._model?.animations;
+		if (anims)
+		{
+			return anims.some(a => a.name === name);
+		}
+		return false;
+	}
+
+	_getAnimationNamesJson(): string
+	{
+		const names = this._animationController?.getAnimationNames() ??
+			this._model?.animations.map(a => a.name) ?? [];
+		return JSON.stringify(names);
+	}
+
 	async _loadModel(url: string): Promise<void>
 	{
 		// Prevent concurrent loads
@@ -429,6 +674,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			{
 				this._setTicking2(true);
 			}
+
+			// Create animation controller if model has skinning/animation data
+			this._createAnimationController();
 
 			// Trigger "On Loaded" condition
 			this._trigger(C3.Plugins.GltfStatic.Cnds.OnLoaded);

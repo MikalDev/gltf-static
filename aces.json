@@ -150,5 +150,157 @@
 				"returnType": "number"
 			}
 		]
+	},
+	"animation": {
+		"conditions": [
+			{
+				"id": "is-animation-playing",
+				"scriptName": "IsAnimationPlaying",
+				"highlight": false
+			},
+			{
+				"id": "is-animation-paused",
+				"scriptName": "IsAnimationPaused",
+				"highlight": false
+			},
+			{
+				"id": "has-animation",
+				"scriptName": "HasAnimation",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "on-animation-finished",
+				"scriptName": "OnAnimationFinished",
+				"highlight": true,
+				"isTrigger": true
+			}
+		],
+		"actions": [
+			{
+				"id": "play-animation",
+				"scriptName": "PlayAnimation",
+				"highlight": true,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "play-animation-by-index",
+				"scriptName": "PlayAnimationByIndex",
+				"highlight": false,
+				"params": [
+					{
+						"id": "index",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "stop-animation",
+				"scriptName": "StopAnimation",
+				"highlight": false
+			},
+			{
+				"id": "pause-animation",
+				"scriptName": "PauseAnimation",
+				"highlight": false
+			},
+			{
+				"id": "resume-animation",
+				"scriptName": "ResumeAnimation",
+				"highlight": false
+			},
+			{
+				"id": "set-animation-time",
+				"scriptName": "SetAnimationTime",
+				"highlight": false,
+				"params": [
+					{
+						"id": "time",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "set-animation-speed",
+				"scriptName": "SetAnimationSpeed",
+				"highlight": false,
+				"params": [
+					{
+						"id": "speed",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "set-animation-loop",
+				"scriptName": "SetAnimationLoop",
+				"highlight": false,
+				"params": [
+					{
+						"id": "loop",
+						"type": "combo",
+						"items": ["no", "yes"]
+					}
+				]
+			}
+		],
+		"expressions": [
+			{
+				"id": "animation-time",
+				"expressionName": "AnimationTime",
+				"returnType": "number"
+			},
+			{
+				"id": "animation-duration",
+				"expressionName": "AnimationDuration",
+				"returnType": "number"
+			},
+			{
+				"id": "animation-name",
+				"expressionName": "AnimationName",
+				"returnType": "string"
+			},
+			{
+				"id": "animation-count",
+				"expressionName": "AnimationCount",
+				"returnType": "number"
+			},
+			{
+				"id": "animation-name-at",
+				"expressionName": "AnimationNameAt",
+				"returnType": "string",
+				"params": [
+					{
+						"id": "index",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "animation-speed",
+				"expressionName": "AnimationSpeed",
+				"returnType": "number"
+			},
+			{
+				"id": "animation-progress",
+				"expressionName": "AnimationProgress",
+				"returnType": "number"
+			},
+			{
+				"id": "animation-names",
+				"expressionName": "AnimationNames",
+				"returnType": "string"
+			}
+		]
 	}
 }

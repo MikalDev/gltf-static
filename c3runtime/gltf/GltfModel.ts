@@ -112,6 +112,11 @@ export class GltfModel {
 		return this._animations;
 	}
 
+	/** Get all meshes in the model (read-only) */
+	get meshes(): readonly GltfMesh[] {
+		return this._meshes;
+	}
+
 	/** Get skinning data for a specific mesh by index */
 	getMeshSkinningData(meshIndex: number): MeshSkinningData | undefined {
 		return this._meshSkinningData.get(meshIndex);

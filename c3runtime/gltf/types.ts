@@ -49,6 +49,20 @@ export interface CachedSkinData {
 }
 
 // ============================================================================
+// Joint Transform State (for runtime animation)
+// ============================================================================
+
+/** Per-joint transform state used during animation evaluation */
+export interface JointTransform {
+	/** Local translation (vec3) */
+	translation: Float32Array;
+	/** Local rotation (quaternion) */
+	rotation: Float32Array;
+	/** Local scale (vec3) */
+	scale: Float32Array;
+}
+
+// ============================================================================
 // Animation Data Types
 // ============================================================================
 

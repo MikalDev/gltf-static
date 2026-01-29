@@ -40,7 +40,8 @@
 					}
 				},
 				"aceCategories": {
-					"gltf": "glTF"
+					"gltf": "glTF",
+					"animation": "Animation"
 				},
 				"conditions": {
 					"is-loaded": {
@@ -62,6 +63,32 @@
 						"list-name": "Is using workers",
 						"display-text": "{my} is using workers",
 						"description": "True if worker threads are being used for transform calculations."
+					},
+					"is-animation-playing": {
+						"list-name": "Is animation playing",
+						"display-text": "{my} animation is playing",
+						"description": "True if an animation is currently playing."
+					},
+					"is-animation-paused": {
+						"list-name": "Is animation paused",
+						"display-text": "{my} animation is paused",
+						"description": "True if an animation is currently paused."
+					},
+					"has-animation": {
+						"list-name": "Has animation",
+						"display-text": "{my} has animation [b]{0}[/b]",
+						"description": "True if the model has an animation with the given name.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The animation name to check for."
+							}
+						}
+					},
+					"on-animation-finished": {
+						"list-name": "On animation finished",
+						"display-text": "On {my} animation finished",
+						"description": "Triggered when a non-looping animation finishes playing."
 					}
 				},
 				"actions": {
@@ -139,6 +166,80 @@
 								}
 							}
 						}
+					},
+					"play-animation": {
+						"list-name": "Play animation",
+						"display-text": "{my} play animation [b]{0}[/b]",
+						"description": "Play an animation by name.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The name of the animation to play."
+							}
+						}
+					},
+					"play-animation-by-index": {
+						"list-name": "Play animation by index",
+						"display-text": "{my} play animation at index [b]{0}[/b]",
+						"description": "Play an animation by its index (0-based).",
+						"params": {
+							"index": {
+								"name": "Index",
+								"desc": "The index of the animation to play (0-based)."
+							}
+						}
+					},
+					"stop-animation": {
+						"list-name": "Stop animation",
+						"display-text": "{my} stop animation",
+						"description": "Stop the current animation and keep the current pose."
+					},
+					"pause-animation": {
+						"list-name": "Pause animation",
+						"display-text": "{my} pause animation",
+						"description": "Pause the current animation."
+					},
+					"resume-animation": {
+						"list-name": "Resume animation",
+						"display-text": "{my} resume animation",
+						"description": "Resume a paused animation."
+					},
+					"set-animation-time": {
+						"list-name": "Set animation time",
+						"display-text": "{my} set animation time to [b]{0}[/b]",
+						"description": "Jump to a specific time in the current animation.",
+						"params": {
+							"time": {
+								"name": "Time",
+								"desc": "The time in seconds to jump to."
+							}
+						}
+					},
+					"set-animation-speed": {
+						"list-name": "Set animation speed",
+						"display-text": "{my} set animation speed to [b]{0}[/b]",
+						"description": "Set the playback speed multiplier (1 = normal speed).",
+						"params": {
+							"speed": {
+								"name": "Speed",
+								"desc": "The playback speed multiplier (e.g., 0.5 = half speed, 2 = double speed)."
+							}
+						}
+					},
+					"set-animation-loop": {
+						"list-name": "Set animation loop",
+						"display-text": "{my} set animation loop [b]{0}[/b]",
+						"description": "Set whether the animation should loop.",
+						"params": {
+							"loop": {
+								"name": "Loop",
+								"desc": "Whether to loop the animation.",
+								"items": {
+									"no": "No",
+									"yes": "Yes"
+								}
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -181,6 +282,44 @@
 					"mesh-count": {
 						"description": "Get the number of meshes in the model.",
 						"translated-name": "MeshCount"
+					},
+					"animation-time": {
+						"description": "Get the current animation playback time in seconds.",
+						"translated-name": "AnimationTime"
+					},
+					"animation-duration": {
+						"description": "Get the duration of the current animation in seconds.",
+						"translated-name": "AnimationDuration"
+					},
+					"animation-name": {
+						"description": "Get the name of the currently playing animation.",
+						"translated-name": "AnimationName"
+					},
+					"animation-count": {
+						"description": "Get the number of animations in the model.",
+						"translated-name": "AnimationCount"
+					},
+					"animation-name-at": {
+						"description": "Get the name of the animation at the given index.",
+						"translated-name": "AnimationNameAt",
+						"params": {
+							"index": {
+								"name": "Index",
+								"desc": "The animation index (0-based)."
+							}
+						}
+					},
+					"animation-speed": {
+						"description": "Get the current animation playback speed multiplier.",
+						"translated-name": "AnimationSpeed"
+					},
+					"animation-progress": {
+						"description": "Get the animation progress as a value from 0 to 1.",
+						"translated-name": "AnimationProgress"
+					},
+					"animation-names": {
+						"description": "Get a JSON array of all animation names.",
+						"translated-name": "AnimationNames"
 					}
 				}
 			}
