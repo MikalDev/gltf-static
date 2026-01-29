@@ -696,21 +696,22 @@ export class AnimationController {
 		const joint = this._skinData.joints[jointIndex];
 		const transform = this._jointTransforms[jointIndex];
 
-		// Build local matrix from TRS
-		mat4.fromRotationTranslationScale(
-			this._tempMat4A as mat4,
-			transform.rotation as quat,
-			transform.translation as vec3,
-			transform.scale as vec3
-		);
-
 		// Get destination subarray for this joint's world matrix
 		const worldMatOffset = jointIndex * 16;
 		const worldMat = this._jointWorldMatrices.subarray(worldMatOffset, worldMatOffset + 16);
 
 		if (joint.parentIndex >= 0) {
 			// Ensure parent is computed first (handles any joint ordering)
+			// IMPORTANT: Do this BEFORE building local matrix, as recursion uses _tempMat4A
 			this._computeJointWorldMatrix(joint.parentIndex);
+
+			// Build local matrix from TRS (after recursion to avoid _tempMat4A corruption)
+			mat4.fromRotationTranslationScale(
+				this._tempMat4A as mat4,
+				transform.rotation as quat,
+				transform.translation as vec3,
+				transform.scale as vec3
+			);
 
 			// Multiply parent world matrix * local matrix
 			const parentOffset = joint.parentIndex * 16;
@@ -718,6 +719,13 @@ export class AnimationController {
 			mat4.multiply(worldMat as mat4, parentMat as mat4, this._tempMat4A as mat4);
 		} else {
 			// Root joint: world matrix = local matrix
+			// Build local matrix from TRS
+			mat4.fromRotationTranslationScale(
+				this._tempMat4A as mat4,
+				transform.rotation as quat,
+				transform.translation as vec3,
+				transform.scale as vec3
+			);
 			worldMat.set(this._tempMat4A);
 		}
 
