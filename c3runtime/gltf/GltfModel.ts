@@ -1,8 +1,19 @@
-import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root } from "@gltf-transform/core";
+import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root, Skin, Animation } from "@gltf-transform/core";
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
 import { TransformWorkerPool, SharedWorkerPool } from "./TransformWorkerPool.js";
-import { modelCache, CachedModelData } from "./types.js";
+import {
+	modelCache,
+	CachedModelData,
+	CachedSkinData,
+	CachedAnimationData,
+	MeshSkinningData,
+	JointData,
+	AnimationSamplerData,
+	AnimationChannelData,
+	AnimationInterpolation,
+	AnimationTargetPath
+} from "./types.js";
 
 // Debug logging - set to false to disable
 const DEBUG = false;
@@ -67,6 +78,11 @@ export class GltfModel {
 	// Bounding box center of all mesh positions (for rotation pivot)
 	private _localCenter: Float32Array = new Float32Array(3);
 
+	// Skinning and animation data (references to shared cache, NOT owned)
+	private _skins: CachedSkinData[] = [];
+	private _animations: CachedAnimationData[] = [];
+	private _meshSkinningData: Map<number, MeshSkinningData> = new Map();
+
 	get isLoaded(): boolean {
 		return this._isLoaded;
 	}
@@ -79,6 +95,33 @@ export class GltfModel {
 	/** Whether worker pool is being used for transforms */
 	get useWorkers(): boolean {
 		return this._useWorkers && this._workerPool !== null;
+	}
+
+	/** Whether this model has any skinned meshes */
+	get hasSkinning(): boolean {
+		return this._skins.length > 0;
+	}
+
+	/** Get all skins (skeletons) in the model */
+	get skins(): readonly CachedSkinData[] {
+		return this._skins;
+	}
+
+	/** Get all animations in the model */
+	get animations(): readonly CachedAnimationData[] {
+		return this._animations;
+	}
+
+	/** Get skinning data for a specific mesh by index */
+	getMeshSkinningData(meshIndex: number): MeshSkinningData | undefined {
+		return this._meshSkinningData.get(meshIndex);
+	}
+
+	/** Get the skin data for a specific mesh (via its skinning data) */
+	getMeshSkin(meshIndex: number): CachedSkinData | undefined {
+		const skinningData = this._meshSkinningData.get(meshIndex);
+		if (!skinningData) return undefined;
+		return this._skins[skinningData.skinIndex];
 	}
 
 	/**
@@ -161,11 +204,31 @@ export class GltfModel {
 		const textureMap = await this._loadTextures(renderer, root, loadedTextures);
 		debugLog(`${loadedTextures.length} textures loaded in ${(performance.now() - textureStart).toFixed(0)}ms`);
 
+		// Extract skins (skeleton data)
+		debugLog("Extracting skin data...");
+		const skinStart = performance.now();
+		const { skins, skinMap } = this._extractSkins(root);
+		debugLog(`${skins.length} skin(s) extracted in ${(performance.now() - skinStart).toFixed(0)}ms`);
+
+		// Extract animations
+		debugLog("Extracting animation data...");
+		const animStart = performance.now();
+		const animations = this._extractAnimations(root, skins);
+		debugLog(`${animations.length} animation(s) extracted in ${(performance.now() - animStart).toFixed(0)}ms`);
+
+		// Extract per-mesh skinning data (JOINTS_0, WEIGHTS_0)
+		// This is done during mesh processing, but we need to pass the skinMap
+		// Store skinMap temporarily on the cached data for use during mesh creation
+		const meshSkinningData = new Map<number, MeshSkinningData>();
+
 		return {
 			url,
 			document,
 			textureMap,
-			refCount: 1
+			refCount: 1,
+			skins,
+			meshSkinningData,
+			animations
 		};
 	}
 
@@ -190,11 +253,30 @@ export class GltfModel {
 			const sceneList = root.listScenes();
 			debugLog(`Found ${sceneList.length} scene(s)`);
 
+			// Rebuild skinMap from document (maps glTF Skin objects to indices in cached.skins)
+			const skinMap = new Map<Skin, number>();
+			const skinList = root.listSkins();
+			for (let i = 0; i < skinList.length; i++) {
+				skinMap.set(skinList[i], i);
+			}
+
+			// Track mesh index across the entire traversal
+			const meshIndexCounter = { value: 0 };
+
 			for (const scene of sceneList) {
 				const children = scene.listChildren();
 				debugLog(`Scene has ${children.length} root node(s)`);
 				for (const node of children) {
-					this._processNode(renderer, node, cached.textureMap, identityMatrix, loadedMeshes);
+					this._processNode(
+						renderer,
+						node,
+						cached.textureMap,
+						identityMatrix,
+						loadedMeshes,
+						skinMap,
+						cached.meshSkinningData,
+						meshIndexCounter
+					);
 				}
 			}
 			debugLog(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
@@ -203,6 +285,26 @@ export class GltfModel {
 			this._textures = [...cached.textureMap.values()];
 			this._meshes = loadedMeshes;
 			this._computeLocalCenter();
+
+			// Store references to cached skinning/animation data
+			this._skins = cached.skins;
+			this._animations = cached.animations;
+			this._meshSkinningData = cached.meshSkinningData;
+
+			// Wire up skinning data to meshes
+			let skinnedMeshCount = 0;
+			for (let i = 0; i < loadedMeshes.length; i++) {
+				const skinningData = cached.meshSkinningData.get(i);
+				if (skinningData) {
+					const skinData = cached.skins[skinningData.skinIndex];
+					loadedMeshes[i].setSkinningData(skinningData, skinData);
+					skinnedMeshCount++;
+				}
+			}
+			if (skinnedMeshCount > 0) {
+				debugLog(`Wired up skinning data for ${skinnedMeshCount} mesh(es)`);
+			}
+
 			this._isLoaded = true;
 
 			// Setup worker pool if beneficial
@@ -213,6 +315,9 @@ export class GltfModel {
 				textures: this._textures.length,
 				vertices: this._totalVertices,
 				indices: this._totalIndices,
+				skins: this._skins.length,
+				animations: this._animations.length,
+				skinnedMeshes: skinnedMeshCount,
 				useWorkers: this._useWorkers
 			});
 		} catch (err) {
@@ -383,6 +488,9 @@ export class GltfModel {
 
 	/**
 	 * Process a glTF node recursively, adding meshes to flat array.
+	 * @param skinMap Map from glTF Skin to skin index in cached data
+	 * @param meshSkinningData Map to populate with per-mesh skinning data
+	 * @param meshIndexCounter Counter object to track mesh indices across recursion
 	 */
 	private _processNode(
 		renderer: IRenderer,
@@ -390,6 +498,9 @@ export class GltfModel {
 		textureMap: Map<Texture, ITexture>,
 		parentMatrix: mat4,
 		loadedMeshes: GltfMesh[],
+		skinMap: Map<Skin, number>,
+		meshSkinningData: Map<number, MeshSkinningData>,
+		meshIndexCounter: { value: number },
 		depth: number = 0
 	): void {
 		const nodeName = nodeDef.getName() || "(unnamed)";
@@ -400,6 +511,13 @@ export class GltfModel {
 		const localMatrix = this._getLocalMatrix(nodeDef);
 		const worldMatrix = mat4.create();
 		mat4.multiply(worldMatrix, parentMatrix, localMatrix);
+
+		// Check if this node has a skin
+		const skin = nodeDef.getSkin();
+		const skinIndex = skin ? skinMap.get(skin) : undefined;
+		if (skin && skinIndex !== undefined) {
+			debugLog(`${indent}  Node has skin (index ${skinIndex})`);
+		}
 
 		const mesh = nodeDef.getMesh();
 
@@ -415,14 +533,29 @@ export class GltfModel {
 					continue;
 				}
 
+				const currentMeshIndex = meshIndexCounter.value;
+
 				const gltfMesh = this._createMesh(
 					renderer,
 					primitive,
 					worldMatrix,
-					textureMap
+					textureMap,
+					skinIndex
 				);
+
 				if (gltfMesh) {
 					loadedMeshes.push(gltfMesh);
+
+					// Extract skinning data if this node has a skin
+					if (skinIndex !== undefined) {
+						const skinningData = this._extractMeshSkinningData(primitive, skinIndex);
+						if (skinningData) {
+							meshSkinningData.set(currentMeshIndex, skinningData);
+							debugLog(`${indent}    Mesh ${currentMeshIndex}: Skinning data extracted`);
+						}
+					}
+
+					meshIndexCounter.value++;
 				}
 			}
 		}
@@ -433,18 +566,21 @@ export class GltfModel {
 			debugLog(`${indent}  ${children.length} child node(s)`);
 		}
 		for (const child of children) {
-			this._processNode(renderer, child, textureMap, worldMatrix, loadedMeshes, depth + 1);
+			this._processNode(renderer, child, textureMap, worldMatrix, loadedMeshes, skinMap, meshSkinningData, meshIndexCounter, depth + 1);
 		}
 	}
 
 	/**
 	 * Create GltfMesh from primitive, applying transform to positions.
+	 * For skinned meshes, positions are NOT baked with worldMatrix (skinning applies transforms).
+	 * @param skinIndex If present, this mesh is skinned - don't bake transforms
 	 */
 	private _createMesh(
 		renderer: IRenderer,
 		primitive: Primitive,
 		worldMatrix: mat4,
-		textureMap: Map<Texture, ITexture>
+		textureMap: Map<Texture, ITexture>,
+		skinIndex?: number
 	): GltfMesh | null {
 		// Extract raw data
 		const posAccessor = primitive.getAttribute("POSITION");
@@ -507,10 +643,17 @@ export class GltfModel {
 		this._totalVertices += vertexCount;
 		this._totalIndices += indexCount;
 
-		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}`);
+		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}, skinned: ${skinIndex !== undefined}`);
 
 		// Apply world transform to positions (bake transform)
-		positions = this._transformPositions(positions, worldMatrix);
+		// For skinned meshes, keep bind pose positions - skinning will apply transforms at runtime
+		if (skinIndex === undefined) {
+			positions = this._transformPositions(positions, worldMatrix);
+		} else {
+			// Make a copy so we don't modify the original accessor data
+			positions = new Float32Array(positions);
+			debugLog(`    Skinned mesh: keeping bind pose positions (no baking)`);
+		}
 
 		// Get texture from material
 		let texture: ITexture | null = null;
@@ -581,6 +724,301 @@ export class GltfModel {
 		}
 
 		return result;
+	}
+
+	// ========================================================================
+	// Skin Extraction
+	// ========================================================================
+
+	/**
+	 * Extract all skins from the document root.
+	 * Creates a mapping from glTF Skin objects to our CachedSkinData.
+	 */
+	private _extractSkins(root: Root): { skins: CachedSkinData[]; skinMap: Map<Skin, number> } {
+		const skins: CachedSkinData[] = [];
+		const skinMap = new Map<Skin, number>();
+		const skinList = root.listSkins();
+
+		debugLog(`Found ${skinList.length} skin(s) in document`);
+
+		for (const skin of skinList) {
+			const skinIndex = skins.length;
+			skinMap.set(skin, skinIndex);
+
+			const skinData = this._extractSingleSkin(skin);
+			skins.push(skinData);
+
+			debugLog(`Skin ${skinIndex} "${skinData.name}": ${skinData.joints.length} joints`);
+		}
+
+		return { skins, skinMap };
+	}
+
+	/**
+	 * Extract data from a single glTF Skin.
+	 */
+	private _extractSingleSkin(skin: Skin): CachedSkinData {
+		const name = skin.getName() || "(unnamed skin)";
+		const jointNodes = skin.listJoints();
+		const nodeToJointIndex = new Map<GltfNodeDef, number>();
+
+		// Build joint data with hierarchy
+		const joints: JointData[] = [];
+		for (let i = 0; i < jointNodes.length; i++) {
+			const node = jointNodes[i];
+			nodeToJointIndex.set(node, i);
+		}
+
+		// Second pass: build JointData with parent indices
+		for (let i = 0; i < jointNodes.length; i++) {
+			const node = jointNodes[i];
+			const parent = node.getParentNode();
+
+			// Find parent joint index (-1 if parent is not a joint)
+			let parentIndex = -1;
+			if (parent) {
+				const parentJointIdx = nodeToJointIndex.get(parent);
+				if (parentJointIdx !== undefined) {
+					parentIndex = parentJointIdx;
+				}
+			}
+
+			// Get local bind transform
+			const localBindTransform = new Float32Array(16);
+			const localMat = this._getLocalMatrix(node);
+			localBindTransform.set(localMat);
+
+			joints.push({
+				index: i,
+				name: node.getName() || `joint_${i}`,
+				parentIndex,
+				node,
+				localBindTransform
+			});
+		}
+
+		// Extract inverse bind matrices
+		const ibmAccessor = skin.getInverseBindMatrices();
+		let inverseBindMatrices: Float32Array;
+
+		if (ibmAccessor) {
+			const ibmArray = ibmAccessor.getArray();
+			if (ibmArray instanceof Float32Array) {
+				inverseBindMatrices = ibmArray;
+			} else if (ibmArray) {
+				inverseBindMatrices = new Float32Array(ibmArray);
+			} else {
+				// Fallback: identity matrices
+				debugWarn(`Skin "${name}": No inverse bind matrix data, using identity`);
+				inverseBindMatrices = new Float32Array(jointNodes.length * 16);
+				for (let i = 0; i < jointNodes.length; i++) {
+					mat4.identity(inverseBindMatrices.subarray(i * 16, i * 16 + 16) as unknown as mat4);
+				}
+			}
+		} else {
+			// Fallback: identity matrices
+			debugWarn(`Skin "${name}": No inverse bind matrices accessor, using identity`);
+			inverseBindMatrices = new Float32Array(jointNodes.length * 16);
+			for (let i = 0; i < jointNodes.length; i++) {
+				mat4.identity(inverseBindMatrices.subarray(i * 16, i * 16 + 16) as unknown as mat4);
+			}
+		}
+
+		return {
+			name,
+			joints,
+			inverseBindMatrices,
+			nodeToJointIndex
+		};
+	}
+
+	// ========================================================================
+	// Animation Extraction
+	// ========================================================================
+
+	/**
+	 * Extract all animations from the document root.
+	 */
+	private _extractAnimations(root: Root, skins: CachedSkinData[]): CachedAnimationData[] {
+		const animations: CachedAnimationData[] = [];
+		const animList = root.listAnimations();
+
+		debugLog(`Found ${animList.length} animation(s) in document`);
+
+		// Build a combined node-to-joint map from all skins
+		const globalNodeToJoint = new Map<GltfNodeDef, number>();
+		for (const skin of skins) {
+			for (const [node, jointIdx] of skin.nodeToJointIndex) {
+				globalNodeToJoint.set(node, jointIdx);
+			}
+		}
+
+		for (const anim of animList) {
+			const animData = this._extractSingleAnimation(anim, globalNodeToJoint);
+			animations.push(animData);
+			debugLog(`Animation "${animData.name}": ${animData.duration.toFixed(2)}s, ${animData.channels.length} channels, ${animData.samplers.length} samplers`);
+		}
+
+		return animations;
+	}
+
+	/**
+	 * Extract data from a single glTF Animation.
+	 */
+	private _extractSingleAnimation(
+		anim: Animation,
+		nodeToJointIndex: Map<GltfNodeDef, number>
+	): CachedAnimationData {
+		const name = anim.getName() || "(unnamed animation)";
+		const samplers: AnimationSamplerData[] = [];
+		const channels: AnimationChannelData[] = [];
+		let duration = 0;
+
+		// glTF-transform: channels reference samplers directly
+		const gltfChannels = anim.listChannels();
+		const gltfSamplers = anim.listSamplers();
+
+		// Build sampler map for index lookup
+		const samplerIndexMap = new Map<ReturnType<Animation["listSamplers"]>[0], number>();
+		for (let i = 0; i < gltfSamplers.length; i++) {
+			samplerIndexMap.set(gltfSamplers[i], i);
+		}
+
+		// Extract samplers
+		for (const gltfSampler of gltfSamplers) {
+			const inputAccessor = gltfSampler.getInput();
+			const outputAccessor = gltfSampler.getOutput();
+
+			if (!inputAccessor || !outputAccessor) {
+				debugWarn(`Animation "${name}": Sampler missing input or output accessor`);
+				samplers.push({
+					input: new Float32Array(0),
+					output: new Float32Array(0),
+					interpolation: "LINEAR"
+				});
+				continue;
+			}
+
+			const inputArray = inputAccessor.getArray();
+			const outputArray = outputAccessor.getArray();
+
+			const input = inputArray instanceof Float32Array
+				? inputArray
+				: new Float32Array(inputArray || []);
+
+			const output = outputArray instanceof Float32Array
+				? outputArray
+				: new Float32Array(outputArray || []);
+
+			// Track max time for duration
+			if (input.length > 0) {
+				const maxTime = input[input.length - 1];
+				if (maxTime > duration) {
+					duration = maxTime;
+				}
+			}
+
+			const interpolation = (gltfSampler.getInterpolation() || "LINEAR") as AnimationInterpolation;
+
+			samplers.push({
+				input,
+				output,
+				interpolation
+			});
+		}
+
+		// Extract channels
+		for (const gltfChannel of gltfChannels) {
+			const targetNode = gltfChannel.getTargetNode();
+			const targetPath = gltfChannel.getTargetPath() as AnimationTargetPath;
+			const sampler = gltfChannel.getSampler();
+
+			if (!targetNode || !sampler) {
+				debugWarn(`Animation "${name}": Channel missing target node or sampler`);
+				continue;
+			}
+
+			const samplerIndex = samplerIndexMap.get(sampler);
+			if (samplerIndex === undefined) {
+				debugWarn(`Animation "${name}": Channel references unknown sampler`);
+				continue;
+			}
+
+			// Look up joint index
+			const targetJointIndex = nodeToJointIndex.get(targetNode) ?? -1;
+
+			channels.push({
+				targetJointIndex,
+				targetNode: targetJointIndex === -1 ? targetNode : null,
+				targetPath,
+				samplerIndex
+			});
+		}
+
+		return {
+			name,
+			duration,
+			samplers,
+			channels
+		};
+	}
+
+	// ========================================================================
+	// Mesh Skinning Attribute Extraction
+	// ========================================================================
+
+	/**
+	 * Extract per-vertex skinning attributes (JOINTS_0, WEIGHTS_0) from a primitive.
+	 * Returns null if the primitive doesn't have skinning data.
+	 */
+	private _extractMeshSkinningData(
+		primitive: Primitive,
+		skinIndex: number
+	): MeshSkinningData | null {
+		const jointsAccessor = primitive.getAttribute("JOINTS_0");
+		const weightsAccessor = primitive.getAttribute("WEIGHTS_0");
+
+		if (!jointsAccessor || !weightsAccessor) {
+			return null;
+		}
+
+		const jointsArray = jointsAccessor.getArray();
+		const weightsArray = weightsAccessor.getArray();
+
+		if (!jointsArray || !weightsArray) {
+			debugWarn("Skinning accessors have no data");
+			return null;
+		}
+
+		// Convert joints to Uint8Array or Uint16Array
+		let joints: Uint8Array | Uint16Array;
+		if (jointsArray instanceof Uint8Array) {
+			joints = jointsArray;
+		} else if (jointsArray instanceof Uint16Array) {
+			joints = jointsArray;
+		} else {
+			// Convert from other types (e.g., Uint32Array)
+			const maxVal = Math.max(...Array.from(jointsArray));
+			if (maxVal <= 255) {
+				joints = new Uint8Array(jointsArray);
+			} else {
+				joints = new Uint16Array(jointsArray);
+			}
+		}
+
+		// Convert weights to Float32Array
+		const weights = weightsArray instanceof Float32Array
+			? weightsArray
+			: new Float32Array(weightsArray);
+
+		const vertexCount = weights.length / 4;
+		debugLog(`    Skinning: ${vertexCount} vertices, skin index ${skinIndex}`);
+
+		return {
+			joints,
+			weights,
+			skinIndex
+		};
 	}
 
 	/**
@@ -672,6 +1110,7 @@ export class GltfModel {
 	/**
 	 * Release all resources.
 	 * Meshes are released directly, textures are released via cache (shared).
+	 * Skinning/animation data is shared via cache and not directly deleted.
 	 */
 	release(renderer: IRenderer): void {
 		// Release all meshes first (they will unregister from pool)
@@ -687,6 +1126,11 @@ export class GltfModel {
 			this._workerPool = null;
 		}
 		this._useWorkers = false;
+
+		// Clear references to shared skinning/animation data (cache owns this data)
+		this._skins = [];
+		this._animations = [];
+		this._meshSkinningData = new Map();
 
 		// Don't delete textures directly - release via cache
 		this._textures = [];

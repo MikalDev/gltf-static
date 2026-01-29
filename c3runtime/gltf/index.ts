@@ -7,7 +7,17 @@ import { mat4, quat, vec3 } from "gl-matrix";
 // ES module exports
 export { GltfModel, GltfMesh, TransformWorkerPool, SharedWorkerPool, modelCache, mat4, quat, vec3 };
 export type { GltfModelStats, GltfModelOptions } from "./GltfModel.js";
-export type { CachedModelData } from "./types.js";
+export type {
+	CachedModelData,
+	CachedSkinData,
+	CachedAnimationData,
+	MeshSkinningData,
+	JointData,
+	AnimationSamplerData,
+	AnimationChannelData,
+	AnimationInterpolation,
+	AnimationTargetPath
+} from "./types.js";
 
 // Attach to globalThis for C3 worker compatibility
 (globalThis as any).GltfBundle = { GltfModel, GltfMesh, TransformWorkerPool, SharedWorkerPool, modelCache, mat4, vec3, quat };

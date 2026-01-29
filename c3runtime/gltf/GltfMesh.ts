@@ -1,5 +1,6 @@
 import { vec3, mat4 } from "gl-matrix";
 import type { TransformWorkerPool } from "./TransformWorkerPool.js";
+import type { MeshSkinningData, CachedSkinData } from "./types.js";
 
 // Debug logging - set to false to disable
 const DEBUG = false;
@@ -14,12 +15,14 @@ function debugLog(...args: unknown[]): void {
  * Does NOT own texture - just holds reference (Model owns textures).
  *
  * Supports both sync transforms (fallback) and worker-based async transforms.
+ * For skinned meshes, holds reference to shared skinning data from cache.
  */
 export class GltfMesh {
 	private _meshData: IMeshData | null = null;
 	private _texture: ITexture | null = null;
 
 	// Store original positions for runtime transform updates (sync fallback)
+	// For skinned meshes, these are the bind pose positions
 	private _originalPositions: Float32Array | null = null;
 	private _vertexCount: number = 0;
 
@@ -29,6 +32,10 @@ export class GltfMesh {
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
 	private _isRegisteredWithPool = false;
+
+	// Skinning data (reference to shared cached data, NOT owned)
+	private _skinningData: MeshSkinningData | null = null;
+	private _skinData: CachedSkinData | null = null;
 
 	// Debug: track mesh ID for logging
 	private static _nextId: number = 0;
@@ -51,6 +58,33 @@ export class GltfMesh {
 	/** Get original (baked) positions for bounding box computation */
 	get originalPositions(): Float32Array | null {
 		return this._originalPositions;
+	}
+
+	/** Whether this mesh has skinning data */
+	get isSkinned(): boolean {
+		return this._skinningData !== null && this._skinData !== null;
+	}
+
+	/** Get per-vertex skinning attributes (joints/weights) */
+	get skinningData(): MeshSkinningData | null {
+		return this._skinningData;
+	}
+
+	/** Get the skin (skeleton) data for this mesh */
+	get skinData(): CachedSkinData | null {
+		return this._skinData;
+	}
+
+	/**
+	 * Set skinning data for this mesh.
+	 * References are to shared cached data - not owned by this mesh.
+	 */
+	setSkinningData(skinningData: MeshSkinningData | null, skinData: CachedSkinData | null): void {
+		this._skinningData = skinningData;
+		this._skinData = skinData;
+		if (skinningData && skinData) {
+			debugLog(`Mesh #${this._id}: Skinning data set (${skinData.joints.length} joints)`);
+		}
 	}
 
 	/**
@@ -257,5 +291,9 @@ export class GltfMesh {
 		this._originalPositions = null;
 		this._lastMatrix = null;
 		this._vertexCount = 0;
+
+		// Clear skinning references (not owned, just references to cached data)
+		this._skinningData = null;
+		this._skinData = null;
 	}
 }
