@@ -2,7 +2,7 @@ import { vec3, mat4 } from "gl-matrix";
 import type { TransformWorkerPool } from "./TransformWorkerPool.js";
 
 // Debug logging - set to false to disable
-const DEBUG = true;
+const DEBUG = false;
 const LOG_PREFIX = "[GltfMesh]";
 
 function debugLog(...args: unknown[]): void {
@@ -46,6 +46,11 @@ export class GltfMesh {
 	/** Get vertex count */
 	get vertexCount(): number {
 		return this._vertexCount;
+	}
+
+	/** Get original (baked) positions for bounding box computation */
+	get originalPositions(): Float32Array | null {
+		return this._originalPositions;
 	}
 
 	/**

@@ -5,7 +5,7 @@ import { TransformWorkerPool, SharedWorkerPool } from "./TransformWorkerPool.js"
 import { modelCache, CachedModelData } from "./types.js";
 
 // Debug logging - set to false to disable
-const DEBUG = true;
+const DEBUG = false;
 const LOG_PREFIX = "[GltfModel]";
 
 function debugLog(...args: unknown[]): void {
@@ -64,8 +64,16 @@ export class GltfModel {
 	// Matrix dirty tracking to avoid redundant transforms
 	private _lastMatrix: Float32Array | null = null;
 
+	// Bounding box center of all mesh positions (for rotation pivot)
+	private _localCenter: Float32Array = new Float32Array(3);
+
 	get isLoaded(): boolean {
 		return this._isLoaded;
+	}
+
+	/** Bounding box center of all mesh positions (rotation/scale pivot) */
+	get localCenter(): Float32Array {
+		return this._localCenter;
 	}
 
 	/** Whether worker pool is being used for transforms */
@@ -194,6 +202,7 @@ export class GltfModel {
 			// Success - store resources (textures are referenced from cache, not owned)
 			this._textures = [...cached.textureMap.values()];
 			this._meshes = loadedMeshes;
+			this._computeLocalCenter();
 			this._isLoaded = true;
 
 			// Setup worker pool if beneficial
@@ -214,6 +223,38 @@ export class GltfModel {
 			}
 			throw err;
 		}
+	}
+
+	/**
+	 * Compute bounding box center across all mesh positions.
+	 * Used as the pivot origin for rotation and scale.
+	 */
+	private _computeLocalCenter(): void {
+		let minX = Infinity, minY = Infinity, minZ = Infinity;
+		let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+		for (const mesh of this._meshes) {
+			const positions = mesh.originalPositions;
+			if (!positions) continue;
+
+			for (let i = 0; i < positions.length; i += 3) {
+				const x = positions[i];
+				const y = positions[i + 1];
+				const z = positions[i + 2];
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+				if (z < minZ) minZ = z;
+				if (z > maxZ) maxZ = z;
+			}
+		}
+
+		this._localCenter[0] = (minX + maxX) * 0.5;
+		this._localCenter[1] = (minY + maxY) * 0.5;
+		this._localCenter[2] = (minZ + maxZ) * 0.5;
+
+		debugLog("Local center:", this._localCenter);
 	}
 
 	/**

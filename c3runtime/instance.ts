@@ -1,7 +1,7 @@
 // Import types only (not runtime values) for TypeScript checking
 import type { GltfModel as GltfModelType } from "./gltf/GltfModel.js";
 import type { SharedWorkerPool as SharedWorkerPoolType } from "./gltf/TransformWorkerPool.js";
-import type { mat4 as mat4Type, vec3 as vec3Type } from "gl-matrix";
+import type { mat4 as mat4Type, vec3 as vec3Type, quat as quatType } from "gl-matrix";
 
 // Augment globalThis with GltfBundle type
 declare global {
@@ -10,6 +10,7 @@ declare global {
 		SharedWorkerPool: typeof SharedWorkerPoolType;
 		mat4: typeof mat4Type;
 		vec3: typeof vec3Type;
+		quat: typeof quatType;
 	};
 }
 
@@ -17,8 +18,11 @@ declare global {
 const { GltfModel, SharedWorkerPool, mat4, vec3 } = globalThis.GltfBundle;
 
 // Debug logging - set to false to disable
-const DEBUG = true;
+const DEBUG = false;
 const LOG_PREFIX = "[GltfStatic]";
+
+// Model loading debug - set to true to enable verbose model loading logs
+const modelLoadDebug = false;
 
 function debugLog(...args: unknown[]): void {
 	if (DEBUG) console.log(LOG_PREFIX, ...args);
@@ -33,6 +37,14 @@ function debugError(...args: unknown[]): void {
 	console.error(LOG_PREFIX, ...args);
 }
 
+function modelLoadLog(...args: unknown[]): void {
+	if (modelLoadDebug) console.log(LOG_PREFIX, ...args);
+}
+
+function modelLoadWarn(...args: unknown[]): void {
+	if (modelLoadDebug) console.warn(LOG_PREFIX, ...args);
+}
+
 // Property indices (link properties are excluded from _getInitProperties)
 // Only data properties are included: model-url, rotation-x, rotation-y, rotation-z, scale
 const PROP_MODEL_URL = 0;
@@ -41,9 +53,10 @@ const PROP_ROTATION_Y = 2;
 const PROP_ROTATION_Z = 3;
 const PROP_SCALE = 4;
 
-// Reusable matrix/vectors for transform calculations (avoid per-frame allocations)
+// Reusable matrix/vector for transform calculations (avoid per-frame allocations)
 const tempMatrix = mat4.create();
 const tempVec = vec3.create();
+const savedMV = new Float32Array(16);
 
 // Degrees to radians conversion factor
 const DEG_TO_RAD = Math.PI / 180;
@@ -63,24 +76,11 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_model: GltfModelType | null = null;
 	_isLoading: boolean = false;
 
-	// Transform tracking for dirty checks
-	_lastX: number = NaN;
-	_lastY: number = NaN;
-	_lastWidth: number = NaN;
-	_lastAngle: number = NaN;
-	_lastZElevation: number = NaN;
-	_lastRotationX: number = NaN;
-	_lastRotationY: number = NaN;
-	_lastRotationZ: number = NaN;
-	_lastScaleX: number = NaN;
-	_lastScaleY: number = NaN;
-	_lastScaleZ: number = NaN;
+	_realRuntime: unknown
 
 	// Debug stats
 	_drawCount: number = 0;
 	_lastDrawTime: number = 0;
-	_tickCount: number = 0;
-	_transformUpdateCount: number = 0;
 
 	constructor()
 	{
@@ -112,10 +112,11 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			// Auto-load model if URL is set
 			if (this._modelUrl)
 			{
-				debugLog("Auto-loading model from URL:", this._modelUrl);
+				modelLoadLog("Auto-loading model from URL:", this._modelUrl);
 				this._loadModel(this._modelUrl);
 			}
 		}
+		this._realRuntime = (globalThis as any).badlandsR;
 	}
 
 	_release(): void
@@ -131,7 +132,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		{
 			this._model.release(this.runtime.renderer);
 			this._model = null;
-			debugLog("Model resources released");
+			modelLoadLog("Model resources released");
 		}
 	}
 
@@ -154,46 +155,24 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	}
 
 	/**
-	 * Check if instance transform has changed since last update.
+	 * Build model-view matrix: C3_MV * T(position) * R * S * T(-localCenter)
+	 * All TRS is handled on the GPU. Vertices are never modified after initial upload.
+	 * T(-localCenter) shifts model so its center is at origin,
+	 * then S scales, R rotates (both around origin), then T moves to world position.
 	 */
-	_isTransformDirty(): boolean
+	_buildModelViewMatrix(savedMatrix: Float32Array): Float32Array
 	{
-		return (
-			this._lastX !== this.x ||
-			this._lastY !== this.y ||
-			this._lastWidth !== this.width ||
-			this._lastAngle !== this.angle ||
-			this._lastZElevation !== this.zElevation ||
-			this._lastRotationX !== this._rotationX ||
-			this._lastRotationY !== this._rotationY ||
-			this._lastRotationZ !== this._rotationZ ||
-			this._lastScaleX !== this._scaleX ||
-			this._lastScaleY !== this._scaleY ||
-			this._lastScaleZ !== this._scaleZ
-		);
-	}
-
-	/**
-	 * Build transform matrix from instance properties.
-	 * Order: Scale -> 3D Rotation (X, Y, Z) -> 2D Rotation (angle) -> Translation
-	 * This ensures the model is scaled first, then rotated, then positioned.
-	 */
-	_buildTransformMatrix(): Float32Array
-	{
-		// Start with identity
 		mat4.identity(tempMatrix);
 
-		// 1. Translate to instance position
+		// 1. T(position): translate to instance world position
 		vec3.set(tempVec, this.x, this.y, this.totalZElevation);
 		mat4.translate(tempMatrix, tempMatrix, tempVec);
 
-		// 2. Apply 2D angle rotation (around Z axis) - C3's instance angle
+		// 2. R: apply rotations (around origin, which is now the model center)
 		if (this.angle !== 0)
 		{
 			mat4.rotateZ(tempMatrix, tempMatrix, this.angle);
 		}
-
-		// 3. Apply 3D rotations (Euler angles in degrees, converted to radians)
 		if (this._rotationX !== 0)
 		{
 			mat4.rotateX(tempMatrix, tempMatrix, this._rotationX * DEG_TO_RAD);
@@ -207,50 +186,27 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			mat4.rotateZ(tempMatrix, tempMatrix, this._rotationZ * DEG_TO_RAD);
 		}
 
-		// 4. Scale based on instance size and per-axis scale factors
-		// Instance width provides base scale, then per-axis multipliers are applied
-		const baseScale = this.width;
-		vec3.set(tempVec, baseScale * this._scaleX, baseScale * this._scaleY, baseScale * this._scaleZ);
+		// 3. S: scale
+		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
 		mat4.scale(tempMatrix, tempMatrix, tempVec);
 
-		// Update last transform values for dirty checking
-		this._lastX = this.x;
-		this._lastY = this.y;
-		this._lastWidth = this.width;
-		this._lastAngle = this.angle;
-		this._lastZElevation = this.zElevation;
-		this._lastRotationX = this._rotationX;
-		this._lastRotationY = this._rotationY;
-		this._lastRotationZ = this._rotationZ;
-		this._lastScaleX = this._scaleX;
-		this._lastScaleY = this._scaleY;
-		this._lastScaleZ = this._scaleZ;
+		// 4. T(-localCenter): shift model so its center is at origin
+		const lc = this._model!.localCenter;
+		vec3.set(tempVec, -lc[0], -lc[1], -lc[2]);
+		mat4.translate(tempMatrix, tempMatrix, tempVec);
 
-		return tempMatrix as Float32Array;
+		// Combine with C3's model-view (camera transform)
+		return mat4.multiply(tempMatrix, savedMatrix, tempMatrix) as Float32Array;
 	}
 
 	/**
 	 * Called once per frame when ticking is enabled.
-	 * Handles transform updates separately from rendering.
+	 * No CPU vertex transforms — just ensures C3 redraws when model is loaded.
 	 */
 	_tick(): void
 	{
-		this._tickCount++;
 		if (!this._model?.isLoaded) return;
-
-		// Only update if transform changed
-		if (this._isTransformDirty())
-		{
-			this._transformUpdateCount++;
-			const matrix = this._buildTransformMatrix();
-			this._model.updateTransform(matrix);
-
-			// Log every 60 ticks to monitor transform activity
-			if (this._transformUpdateCount % 60 === 1)
-			{
-				debugLog(`Transform update #${this._transformUpdateCount} at tick #${this._tickCount}`);
-			}
-		}
+		this.runtime.sdk.updateRender();
 	}
 
 	/**
@@ -272,9 +228,17 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Draw the glTF model if loaded
 		if (this._model?.isLoaded)
 		{
-			// Just render - transform updates happen in _tick()
-			// Pass tickCount so cull mode is only set once per frame
+			const glRenderer = (globalThis as any).badlandsR.GetWebGLRenderer();
+			savedMV.set(glRenderer._matMV);
+
+			// Build model-view with translation + rotation (vertices are origin-centered)
+			const combined = this._buildModelViewMatrix(savedMV);
+			glRenderer.SetModelViewMatrix(combined);
+
 			this._model.draw(renderer, this.runtime.tickCount);
+
+			// Restore previous matrix
+			glRenderer.SetModelViewMatrix(savedMV);
 
 			const drawTime = performance.now() - drawStart;
 			this._lastDrawTime = drawTime;
@@ -417,11 +381,18 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Prevent concurrent loads
 		if (this._isLoading)
 		{
-			debugWarn("Load already in progress, ignoring request for:", url);
+			modelLoadWarn("Load already in progress, ignoring request for:", url);
 			return;
 		}
 
-		debugLog("Starting model load:", url);
+		// Skip if same URL is already loaded
+		if (this._model?.isLoaded && this._modelUrl === url)
+		{
+			modelLoadLog("Model already loaded, skipping:", url);
+			return;
+		}
+
+		modelLoadLog("Starting model load:", url);
 		const loadStart = performance.now();
 
 		this._modelUrl = url;
@@ -430,13 +401,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Release existing model
 		if (this._model)
 		{
-			debugLog("Releasing previous model");
+			modelLoadLog("Releasing previous model");
 			this._model.release(this.runtime.renderer);
 			this._model = null;
 		}
-
-		// Reset transform tracking to force update on first draw
-		this._lastX = NaN;
 
 		try
 		{
@@ -446,7 +414,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			const loadTime = performance.now() - loadStart;
 			const stats = this._model.getStats();
 
-			debugLog(`Model loaded successfully in ${loadTime.toFixed(0)}ms:`, {
+			modelLoadLog(`Model loaded successfully in ${loadTime.toFixed(0)}ms:`, {
 				url,
 				...stats
 			});

@@ -10,16 +10,16 @@ const PROP_SCALE = "scale";
 // Degrees to radians conversion
 const DEG_TO_RAD = Math.PI / 180;
 
-// Debug logging
-const DEBUG = true;
+// Model loading debug logging
+const modelLoadDebug = false;
 const LOG_PREFIX = "[GltfStaticEditor]";
 
-function debugLog(...args: unknown[]): void {
-	if (DEBUG) console.log(LOG_PREFIX, ...args);
+function modelLoadLog(...args: unknown[]): void {
+	if (modelLoadDebug) console.log(LOG_PREFIX, ...args);
 }
 
-function debugWarn(...args: unknown[]): void {
-	if (DEBUG) console.warn(LOG_PREFIX, ...args);
+function modelLoadWarn(...args: unknown[]): void {
+	if (modelLoadDebug) console.warn(LOG_PREFIX, ...args);
 }
 
 /** Raw mesh data for editor rendering */
@@ -203,7 +203,7 @@ class EditorGltfModel {
 	 * Load model from ArrayBuffer (used by editor which gets blob from project file).
 	 */
 	async loadFromBuffer(arrayBuffer: ArrayBuffer, filename: string): Promise<void> {
-		debugLog("Loading from buffer:", filename, arrayBuffer.byteLength, "bytes");
+		modelLoadLog("Loading from buffer:", filename, arrayBuffer.byteLength, "bytes");
 		const loadStart = performance.now();
 
 		try {
@@ -217,12 +217,12 @@ class EditorGltfModel {
 			}
 
 			this._isLoaded = true;
-			debugLog(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
+			modelLoadLog(`Load complete in ${(performance.now() - loadStart).toFixed(0)}ms:`, {
 				meshCount: this._meshes.length,
 				totalVertices: this._meshes.reduce((sum, m) => sum + m.vertexCount, 0)
 			});
 		} catch (err) {
-			debugWarn("Load failed:", err);
+			modelLoadWarn("Load failed:", err);
 			throw err;
 		}
 	}
@@ -248,7 +248,7 @@ class EditorGltfModel {
 		}
 
 		// const totalLength = view.getUint32(8, true);
-		debugLog("GLB version:", version);
+		modelLoadLog("GLB version:", version);
 
 		// Parse chunks
 		let offset = 12;
@@ -264,10 +264,10 @@ class EditorGltfModel {
 				const jsonBytes = new Uint8Array(buffer, offset, chunkLength);
 				const jsonString = new TextDecoder().decode(jsonBytes);
 				jsonData = JSON.parse(jsonString) as GltfDocument;
-				debugLog("Parsed JSON chunk");
+				modelLoadLog("Parsed JSON chunk");
 			} else if (chunkType === 0x004E4942) {  // "BIN\0"
 				binaryBuffer = buffer.slice(offset, offset + chunkLength);
-				debugLog("Found binary chunk:", chunkLength, "bytes");
+				modelLoadLog("Found binary chunk:", chunkLength, "bytes");
 			}
 
 			offset += chunkLength;
@@ -290,7 +290,7 @@ class EditorGltfModel {
 			for (const bufferDef of jsonData.buffers) {
 				// For now, assume embedded data or single buffer in GLB
 				// External buffer loading would go here
-				debugWarn("External buffer loading not implemented, skipping");
+				modelLoadWarn("External buffer loading not implemented, skipping");
 			}
 		}
 
@@ -299,7 +299,7 @@ class EditorGltfModel {
 
 	private async _processDocument(doc: GltfDocument, buffers: ArrayBuffer[]): Promise<void> {
 		if (!doc.meshes || doc.meshes.length === 0) {
-			debugWarn("No meshes in document");
+			modelLoadWarn("No meshes in document");
 			return;
 		}
 
@@ -322,30 +322,30 @@ class EditorGltfModel {
 
 	private async _decodeImages(doc: GltfDocument, buffers: ArrayBuffer[]): Promise<void> {
 		if (!doc.images || doc.images.length === 0) {
-			debugLog("No images in document");
+			modelLoadLog("No images in document");
 			return;
 		}
 
-		debugLog(`Decoding ${doc.images.length} images...`);
+		modelLoadLog(`Decoding ${doc.images.length} images...`);
 
 		for (let i = 0; i < doc.images.length; i++) {
 			const image = doc.images[i];
 
 			if (image.bufferView === undefined) {
-				debugWarn(`Image ${i}: no bufferView (external images not supported)`);
+				modelLoadWarn(`Image ${i}: no bufferView (external images not supported)`);
 				continue;
 			}
 
 			try {
 				const bufferView = doc.bufferViews?.[image.bufferView];
 				if (!bufferView) {
-					debugWarn(`Image ${i}: bufferView not found`);
+					modelLoadWarn(`Image ${i}: bufferView not found`);
 					continue;
 				}
 
 				const buffer = buffers[bufferView.buffer];
 				if (!buffer) {
-					debugWarn(`Image ${i}: buffer not found`);
+					modelLoadWarn(`Image ${i}: buffer not found`);
 					continue;
 				}
 
@@ -354,9 +354,9 @@ class EditorGltfModel {
 				const blob = new Blob([imageData], { type: image.mimeType || 'image/png' });
 				const imageBitmap = await createImageBitmap(blob);
 				this._images[i] = imageBitmap;
-				debugLog(`Image ${i}: ${imageBitmap.width}x${imageBitmap.height}`);
+				modelLoadLog(`Image ${i}: ${imageBitmap.width}x${imageBitmap.height}`);
 			} catch (err) {
-				debugWarn(`Image ${i}: decode failed:`, err);
+				modelLoadWarn(`Image ${i}: decode failed:`, err);
 			}
 		}
 	}
@@ -400,7 +400,7 @@ class EditorGltfModel {
 		for (const primitive of mesh.primitives) {
 			// Only process triangles (mode 4 is default)
 			if (primitive.mode !== undefined && primitive.mode !== 4) {
-				debugWarn("Skipping non-triangle primitive, mode:", primitive.mode);
+				modelLoadWarn("Skipping non-triangle primitive, mode:", primitive.mode);
 				continue;
 			}
 
@@ -417,14 +417,14 @@ class EditorGltfModel {
 		const idxIdx = primitive.indices;
 
 		if (posIdx === undefined || idxIdx === undefined) {
-			debugWarn("Primitive missing POSITION or indices");
+			modelLoadWarn("Primitive missing POSITION or indices");
 			return null;
 		}
 
 		// Extract positions
 		const positions = this._getAccessorData(doc, buffers, posIdx);
 		if (!positions) {
-			debugWarn("Failed to extract positions");
+			modelLoadWarn("Failed to extract positions");
 			return null;
 		}
 
@@ -440,7 +440,7 @@ class EditorGltfModel {
 		// Extract indices
 		const indicesData = this._getAccessorData(doc, buffers, idxIdx);
 		if (!indicesData) {
-			debugWarn("Failed to extract indices");
+			modelLoadWarn("Failed to extract indices");
 			return null;
 		}
 
@@ -455,7 +455,7 @@ class EditorGltfModel {
 				if (indicesData[i] > maxIndex) maxIndex = indicesData[i];
 			}
 			if (maxIndex > 65535) {
-				debugWarn(`Mesh has ${maxIndex} vertices but DrawMesh only supports 65535. Indices will be truncated.`);
+				modelLoadWarn(`Mesh has ${maxIndex} vertices but DrawMesh only supports 65535. Indices will be truncated.`);
 			}
 			indices = new Uint16Array(indicesData);
 		} else if (indicesData instanceof Uint8Array) {
@@ -493,7 +493,7 @@ class EditorGltfModel {
 			}
 		}
 
-		debugLog(`Primitive: ${vertexCount} vertices, ${indices.length / 3} triangles, texture: ${textureIndex}`);
+		modelLoadLog(`Primitive: ${vertexCount} vertices, ${indices.length / 3} triangles, texture: ${textureIndex}`);
 
 		return {
 			positions: transformedPositions,
@@ -584,7 +584,7 @@ class EditorGltfModel {
 			case 5121:  // UNSIGNED_BYTE
 				return new Uint8Array(rawBytes);
 			default:
-				debugWarn("Unsupported component type:", accessor.componentType);
+				modelLoadWarn("Unsupported component type:", accessor.componentType);
 				return null;
 		}
 	}
@@ -673,17 +673,16 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 
 	/**
 	 * Load glTF model from project file
+	 * DISABLED: Editor now only shows placeholder image for performance
 	 */
 	async _loadModel(url: string): Promise<void>
 	{
-		if (this._isLoading) return;
-		if (!url) return;
-
-		debugLog("Loading model:", url);
-		this._isLoading = true;
+		// Skip model loading in editor - only use placeholder image
+		modelLoadLog("Model loading disabled in editor, using placeholder only:", url);
+		this._isLoading = false;
 		this._lastModelUrl = url;
 
-		// Release previous model and textures
+		// Release any existing model
 		if (this._model)
 		{
 			this._model.release();
@@ -692,43 +691,9 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 		this._releaseTextures();
 		this._transformedMeshes = [];
 
-		try
-		{
-			// Get the project file using SDK methods
-			const project = this.GetProject();
-			const projectFile = project.GetProjectFileByExportPath(url);
-
-			if (!projectFile)
-			{
-				throw new Error(`Project file not found: ${url}`);
-			}
-
-			// Get blob from project file and convert to ArrayBuffer
-			const blob = projectFile.GetBlob();
-			const arrayBuffer = await blob.arrayBuffer();
-
-			debugLog("Got project file blob:", arrayBuffer.byteLength, "bytes");
-
-			this._model = new EditorGltfModel();
-			await this._model.loadFromBuffer(arrayBuffer, url);
-			debugLog("Model loaded successfully:", this._model.meshes.length, "meshes");
-
-			// Clear transform cache to force rebuild
-			this._lastTransformKey = "";
-		}
-		catch (err)
-		{
-			console.error(LOG_PREFIX, "Failed to load model:", err);
-			this._model = null;
-		}
-		finally
-		{
-			this._isLoading = false;
-
-			// Request redraw now that model is loaded
-			if (this._layoutView)
-				this._layoutView.Refresh();
-		}
+		// Request redraw to show placeholder
+		if (this._layoutView)
+			this._layoutView.Refresh();
 	}
 
 	/**
@@ -843,7 +808,7 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 		this._lastRenderer = iRenderer;
 
 		const images = this._model.images;
-		debugLog(`Creating ${images.length} WebGL textures...`);
+		modelLoadLog(`Creating ${images.length} WebGL textures...`);
 
 		for (let i = 0; i < images.length; i++)
 		{
@@ -865,11 +830,11 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 				});
 				iRenderer.UpdateTexture(img, tex, { premultiplyAlpha: true });
 				this._textures[i] = tex;
-				debugLog(`Texture ${i}: ${img.width}x${img.height}`);
+				modelLoadLog(`Texture ${i}: ${img.width}x${img.height}`);
 			}
 			catch (err)
 			{
-				debugWarn(`Texture ${i}: creation failed:`, err);
+				modelLoadWarn(`Texture ${i}: creation failed:`, err);
 				this._textures[i] = null as unknown as SDK.Gfx.IWebGLTexture;
 			}
 		}
