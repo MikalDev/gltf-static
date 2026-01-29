@@ -83,6 +83,9 @@ export class AnimationController {
 	public playbackRate: number = 1.0;
 	public loop: boolean = true;
 
+	// Worker skinning mode: when true, skip main thread skinning (workers will do it)
+	public useWorkerSkinning: boolean = false;
+
 	// Event callback
 	public onComplete?: () => void;
 
@@ -240,7 +243,11 @@ export class AnimationController {
 		this._evaluateAnimation(this._time);
 		this._computeJointWorldMatrices();
 		this._computeBoneMatrices();
-		this._applyAllSkinning();
+
+		// Skip main thread skinning if workers will do it
+		if (!this.useWorkerSkinning) {
+			this._applyAllSkinning();
+		}
 
 		debugLog(`Playing "${name}" from ${startTime.toFixed(2)}s (duration: ${anim.duration.toFixed(2)}s)`);
 	}
@@ -325,7 +332,11 @@ export class AnimationController {
 		this._evaluateAnimation(this._time);
 		this._computeJointWorldMatrices();
 		this._computeBoneMatrices();
-		this._applyAllSkinning();
+
+		// Skip main thread skinning if workers will do it
+		if (!this.useWorkerSkinning) {
+			this._applyAllSkinning();
+		}
 	}
 
 	/**
@@ -341,7 +352,11 @@ export class AnimationController {
 		this._evaluateAnimation(this._time);
 		this._computeJointWorldMatrices();
 		this._computeBoneMatrices();
-		this._applyAllSkinning();
+
+		// Skip main thread skinning if workers will do it
+		if (!this.useWorkerSkinning) {
+			this._applyAllSkinning();
+		}
 	}
 
 	/**
@@ -440,6 +455,46 @@ export class AnimationController {
 			throw new Error(`Invalid mesh index: ${meshIndex}`);
 		}
 		return this._skinnedPositions[meshIndex];
+	}
+
+	/**
+	 * Get the bone matrices for worker-based skinning.
+	 * Returns a VIEW into the internal buffer - do not modify.
+	 * Call this after update() to get matrices for the current frame.
+	 * @returns Bone matrices (Float32Array, 16 floats per joint, flattened)
+	 */
+	getBoneMatrices(): Float32Array {
+		return this._boneMatrices;
+	}
+
+	/**
+	 * Get the joint count (number of bones in skeleton).
+	 */
+	getJointCount(): number {
+		return this._skinData.joints.length;
+	}
+
+	/**
+	 * Get mesh skinning data for worker registration.
+	 * Returns the joints and weights arrays needed for worker-based skinning.
+	 * @param meshIndex Index of the mesh
+	 */
+	getMeshSkinningData(meshIndex: number): MeshSkinningData {
+		if (meshIndex < 0 || meshIndex >= this._meshes.length) {
+			throw new Error(`Invalid mesh index: ${meshIndex}`);
+		}
+		return this._meshes[meshIndex].skinningData;
+	}
+
+	/**
+	 * Get original (bind pose) positions for a mesh.
+	 * @param meshIndex Index of the mesh
+	 */
+	getOriginalPositions(meshIndex: number): Float32Array {
+		if (meshIndex < 0 || meshIndex >= this._meshes.length) {
+			throw new Error(`Invalid mesh index: ${meshIndex}`);
+		}
+		return this._meshes[meshIndex].originalPositions;
 	}
 
 	/**

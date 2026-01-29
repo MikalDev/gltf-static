@@ -18,6 +18,7 @@ function debugLog(...args: unknown[]): void {
 // Inline worker code as string for blob URL creation (avoids separate file bundling)
 const WORKER_CODE = `
 const meshCache = new Map();
+const skinnedMeshCache = new Map();
 
 // Transform vertices from original to output buffer at specified offset
 function transformVerticesInto(original, output, offset, matrix, vertexCount) {
@@ -39,6 +40,49 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 	}
 }
 
+// Apply CPU skinning: transform vertices by weighted blend of bone matrices
+// boneMatrices: flattened array of 4x4 matrices (16 floats per bone)
+// joints: per-vertex joint indices (4 per vertex, Uint8Array or Uint16Array)
+// weights: per-vertex weights (4 per vertex, Float32Array)
+function skinVerticesInto(original, output, offset, boneMatrices, joints, weights, vertexCount) {
+	for (let v = 0; v < vertexCount; v++) {
+		const posOffset = v * 3;
+		const skinOffset = v * 4;
+		const dstOffset = offset + posOffset;
+
+		// Read original position
+		const px = original[posOffset];
+		const py = original[posOffset + 1];
+		const pz = original[posOffset + 2];
+
+		// Accumulate weighted transforms
+		let rx = 0, ry = 0, rz = 0;
+
+		for (let j = 0; j < 4; j++) {
+			const weight = weights[skinOffset + j];
+			if (weight === 0) continue;
+
+			const jointIdx = joints[skinOffset + j];
+			const boneOffset = jointIdx * 16;
+			const m = boneMatrices;
+
+			// Transform position by bone matrix: result = M * p (with w=1)
+			const tx = m[boneOffset + 0] * px + m[boneOffset + 4] * py + m[boneOffset + 8] * pz + m[boneOffset + 12];
+			const ty = m[boneOffset + 1] * px + m[boneOffset + 5] * py + m[boneOffset + 9] * pz + m[boneOffset + 13];
+			const tz = m[boneOffset + 2] * px + m[boneOffset + 6] * py + m[boneOffset + 10] * pz + m[boneOffset + 14];
+
+			rx += tx * weight;
+			ry += ty * weight;
+			rz += tz * weight;
+		}
+
+		// Write skinned position
+		output[dstOffset] = rx;
+		output[dstOffset + 1] = ry;
+		output[dstOffset + 2] = rz;
+	}
+}
+
 self.onmessage = (e) => {
 	const msg = e.data;
 
@@ -50,6 +94,20 @@ self.onmessage = (e) => {
 				original: positions,
 				vertexCount,
 				floatCount: positions.length
+			});
+			break;
+		}
+
+		case "REGISTER_SKIN": {
+			// Register a skinned mesh with its bind pose positions and skinning data
+			// joints/weights are NOT transferred (copied) so they persist
+			const vertexCount = msg.positions.length / 3;
+			skinnedMeshCache.set(msg.meshId, {
+				original: msg.positions,  // transferred
+				joints: msg.joints,       // transferred
+				weights: msg.weights,     // transferred
+				vertexCount,
+				floatCount: msg.positions.length
 			});
 			break;
 		}
@@ -96,13 +154,65 @@ self.onmessage = (e) => {
 			break;
 		}
 
+		case "SKIN_BATCH": {
+			// Process skinning for multiple meshes sharing the same bone matrices
+			// msg.boneMatrices: Float32Array of bone matrices (shared across all meshes)
+			// msg.meshIds: array of mesh IDs to skin
+			const boneMatrices = msg.boneMatrices;
+			const requestedMeshIds = msg.meshIds;
+
+			// Calculate total size and collect valid entries
+			let totalFloats = 0;
+			const meshEntries = [];
+			for (const meshId of requestedMeshIds) {
+				const entry = skinnedMeshCache.get(meshId);
+				if (!entry) continue;
+				totalFloats += entry.floatCount;
+				meshEntries.push({ meshId, entry });
+			}
+
+			if (meshEntries.length === 0) {
+				self.postMessage({ type: "SKIN_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0) }, []);
+				break;
+			}
+
+			// Allocate single packed buffer
+			const packedPositions = new Float32Array(totalFloats);
+			const offsets = new Uint32Array(meshEntries.length + 1);
+			const meshIds = new Uint32Array(meshEntries.length);
+
+			let offset = 0;
+			for (let i = 0; i < meshEntries.length; i++) {
+				const { meshId, entry } = meshEntries[i];
+
+				// Apply skinning into packed buffer
+				skinVerticesInto(
+					entry.original, packedPositions, offset,
+					boneMatrices, entry.joints, entry.weights, entry.vertexCount
+				);
+
+				meshIds[i] = meshId;
+				offsets[i] = offset;
+				offset += entry.floatCount;
+			}
+			offsets[meshEntries.length] = offset;
+
+			self.postMessage(
+				{ type: "SKIN_RESULTS", meshIds, offsets, positions: packedPositions },
+				[packedPositions.buffer, meshIds.buffer, offsets.buffer]
+			);
+			break;
+		}
+
 		case "UNREGISTER": {
 			meshCache.delete(msg.meshId);
+			skinnedMeshCache.delete(msg.meshId);
 			break;
 		}
 
 		case "CLEAR": {
 			meshCache.clear();
+			skinnedMeshCache.clear();
 			break;
 		}
 	}
@@ -116,9 +226,19 @@ interface MeshRegistration {
 	callback: TransformCallback;
 }
 
+interface SkinnedMeshRegistration {
+	workerIndex: number;
+	callback: TransformCallback;
+}
+
 interface PendingRequest {
 	meshId: number;
 	matrix: Float32Array;
+}
+
+interface PendingSkinRequest {
+	meshIds: number[];
+	boneMatrices: Float32Array;
 }
 
 interface PendingResult {
@@ -131,7 +251,9 @@ export class TransformWorkerPool {
 	private _workers: Worker[] = [];
 	private _workerBlobUrl: string | null = null;
 	private _meshRegistry = new Map<number, MeshRegistration>();
+	private _skinnedMeshRegistry = new Map<number, SkinnedMeshRegistration>();
 	private _pendingByWorker: Map<number, PendingRequest[]> = new Map();
+	private _pendingSkinByWorker: Map<number, PendingSkinRequest[]> = new Map();
 	private _flushResolvers: Array<() => void> = [];
 	private _pendingResponses = 0;
 	private _pendingResults: PendingResult[] = []; // Collect results for batched callback invocation
@@ -157,6 +279,7 @@ export class TransformWorkerPool {
 			worker.onerror = (e) => console.error("[TransformWorkerPool] Worker error:", e);
 			this._workers.push(worker);
 			this._pendingByWorker.set(i, []);
+			this._pendingSkinByWorker.set(i, []);
 		}
 	}
 
@@ -201,24 +324,112 @@ export class TransformWorkerPool {
 	}
 
 	/**
-	 * Send all queued transforms to workers and wait for completion.
+	 * Register a skinned mesh with the pool for CPU skinning.
+	 * Positions, joints, and weights are transferred to worker (zero-copy).
+	 * @param meshId Unique mesh identifier
+	 * @param positions Original bind pose positions (will be transferred)
+	 * @param joints Per-vertex joint indices, 4 per vertex (will be transferred)
+	 * @param weights Per-vertex weights, 4 per vertex (will be transferred)
+	 * @param callback Called with skinned positions after flush()
+	 */
+	registerSkinnedMesh(
+		meshId: number,
+		positions: Float32Array,
+		joints: Uint8Array | Uint16Array,
+		weights: Float32Array,
+		callback: TransformCallback
+	): void {
+		if (this._disposed) return;
+
+		// Round-robin worker assignment
+		const workerIndex = this._nextWorkerIndex;
+		this._nextWorkerIndex = (this._nextWorkerIndex + 1) % this._workerCount;
+
+		this._skinnedMeshRegistry.set(meshId, { workerIndex, callback });
+
+		// Transfer all data to worker
+		const transferList: ArrayBuffer[] = [positions.buffer];
+		// Only transfer if not already detached (joints/weights may share buffer)
+		if (joints.buffer.byteLength > 0 && !transferList.includes(joints.buffer)) {
+			transferList.push(joints.buffer);
+		}
+		if (weights.buffer.byteLength > 0 && !transferList.includes(weights.buffer)) {
+			transferList.push(weights.buffer);
+		}
+
+		this._workers[workerIndex].postMessage(
+			{ type: "REGISTER_SKIN", meshId, positions, joints, weights },
+			transferList
+		);
+	}
+
+	/**
+	 * Queue skinning for multiple meshes sharing the same bone matrices.
+	 * This is efficient when multiple meshes use the same skeleton (body, clothes, etc).
+	 * @param meshIds Array of mesh IDs to skin
+	 * @param boneMatrices Bone matrices (16 floats per joint, flattened)
+	 */
+	queueSkinning(meshIds: number[], boneMatrices: Float32Array): void {
+		if (this._disposed) return;
+		if (meshIds.length === 0) return;
+
+		// Group meshes by worker
+		const byWorker = new Map<number, number[]>();
+		for (const meshId of meshIds) {
+			const registration = this._skinnedMeshRegistry.get(meshId);
+			if (!registration) {
+				console.warn(`[TransformWorkerPool] Skinned mesh ${meshId} not registered`);
+				continue;
+			}
+			const workerMeshes = byWorker.get(registration.workerIndex);
+			if (workerMeshes) {
+				workerMeshes.push(meshId);
+			} else {
+				byWorker.set(registration.workerIndex, [meshId]);
+			}
+		}
+
+		// Queue skinning request per worker (copy bone matrices for each - small footprint)
+		for (const [workerIndex, workerMeshIds] of byWorker) {
+			this._pendingSkinByWorker.get(workerIndex)!.push({
+				meshIds: workerMeshIds,
+				boneMatrices: new Float32Array(boneMatrices) // Copy to avoid caller reuse issues
+			});
+		}
+	}
+
+	/**
+	 * Send all queued transforms and skinning requests to workers and wait for completion.
 	 * Invokes registered callbacks with results.
 	 */
 	async flush(): Promise<void> {
 		if (this._disposed) return;
 
-		// Count workers with pending work
+		// Count workers with pending work (transform or skinning)
 		let workersWithWork = 0;
 		for (let i = 0; i < this._workerCount; i++) {
-			const pending = this._pendingByWorker.get(i)!;
-			if (pending.length > 0) {
+			const pendingTransforms = this._pendingByWorker.get(i)!;
+			const pendingSkin = this._pendingSkinByWorker.get(i)!;
+
+			if (pendingTransforms.length > 0) {
 				workersWithWork++;
 				this._workers[i].postMessage({
 					type: "TRANSFORM_BATCH",
-					requests: pending
+					requests: pendingTransforms
 				});
 				this._pendingByWorker.set(i, []); // Clear pending
 			}
+
+			// Send skinning requests (one message per request to allow different bone matrices)
+			for (const skinReq of pendingSkin) {
+				workersWithWork++;
+				this._workers[i].postMessage({
+					type: "SKIN_BATCH",
+					meshIds: skinReq.meshIds,
+					boneMatrices: skinReq.boneMatrices
+				});
+			}
+			this._pendingSkinByWorker.set(i, []); // Clear pending
 		}
 
 		// Nothing to flush
@@ -237,13 +448,18 @@ export class TransformWorkerPool {
 		offsets?: Uint32Array;
 		positions?: Float32Array;
 	}): void {
-		if (msg.type === "TRANSFORM_RESULTS" && msg.positions && msg.meshIds && msg.offsets) {
+		const isTransformResult = msg.type === "TRANSFORM_RESULTS";
+		const isSkinResult = msg.type === "SKIN_RESULTS";
+
+		if ((isTransformResult || isSkinResult) && msg.positions && msg.meshIds && msg.offsets) {
 			// Collect result for batched processing
+			// Tag result with type so we know which registry to use for callbacks
 			this._pendingResults.push({
 				meshIds: msg.meshIds,
 				offsets: msg.offsets,
-				positions: msg.positions
-			});
+				positions: msg.positions,
+				isSkinning: isSkinResult
+			} as PendingResult & { isSkinning: boolean });
 
 			// Check if all pending responses received
 			this._pendingResponses--;
@@ -266,15 +482,16 @@ export class TransformWorkerPool {
 	 * This ensures all GPU uploads happen together.
 	 */
 	private _invokeAllCallbacks(): void {
-		for (const result of this._pendingResults) {
-			const { meshIds, offsets, positions } = result;
+		for (const result of this._pendingResults as Array<PendingResult & { isSkinning?: boolean }>) {
+			const { meshIds, offsets, positions, isSkinning } = result;
+			const registry = isSkinning ? this._skinnedMeshRegistry : this._meshRegistry;
 
 			for (let i = 0; i < meshIds.length; i++) {
 				const meshId = meshIds[i];
 				const start = offsets[i];
 				const end = offsets[i + 1];
 
-				const registration = this._meshRegistry.get(meshId);
+				const registration = registry.get(meshId);
 				if (registration) {
 					// Create view into packed buffer (no copy)
 					const meshPositions = positions.subarray(start, end);
@@ -288,10 +505,10 @@ export class TransformWorkerPool {
 	}
 
 	/**
-	 * Remove a mesh from the pool.
+	 * Remove a mesh from the pool (both regular and skinned).
 	 */
 	unregisterMesh(meshId: number): void {
-		const registration = this._meshRegistry.get(meshId);
+		const registration = this._meshRegistry.get(meshId) || this._skinnedMeshRegistry.get(meshId);
 		if (registration && !this._disposed) {
 			this._workers[registration.workerIndex].postMessage({
 				type: "UNREGISTER",
@@ -299,13 +516,21 @@ export class TransformWorkerPool {
 			});
 		}
 		this._meshRegistry.delete(meshId);
+		this._skinnedMeshRegistry.delete(meshId);
 	}
 
 	/**
-	 * Get number of registered meshes.
+	 * Get number of registered meshes (regular transforms).
 	 */
 	get meshCount(): number {
 		return this._meshRegistry.size;
+	}
+
+	/**
+	 * Get number of registered skinned meshes.
+	 */
+	get skinnedMeshCount(): number {
+		return this._skinnedMeshRegistry.size;
 	}
 
 	/**
@@ -333,7 +558,9 @@ export class TransformWorkerPool {
 		}
 
 		this._meshRegistry.clear();
+		this._skinnedMeshRegistry.clear();
 		this._pendingByWorker.clear();
+		this._pendingSkinByWorker.clear();
 		this._pendingResults = [];
 
 		// Resolve any pending flushes

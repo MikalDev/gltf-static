@@ -32,6 +32,7 @@ export class GltfMesh {
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
 	private _isRegisteredWithPool = false;
+	private _isRegisteredSkinnedWithPool = false;
 
 	// Skinning data (reference to shared cached data, NOT owned)
 	private _skinningData: MeshSkinningData | null = null;
@@ -160,6 +161,41 @@ export class GltfMesh {
 
 		this._isRegisteredWithPool = true;
 		debugLog(`Mesh #${this._id}: Registered with worker pool`);
+	}
+
+	/**
+	 * Register this skinned mesh with a worker pool for async CPU skinning.
+	 * Call after create() and setSkinningData(). Transfers positions, joints, weights to worker.
+	 */
+	registerSkinnedWithPool(pool: TransformWorkerPool): void {
+		if (this._isRegisteredSkinnedWithPool) return;
+		if (!this._originalPositions || !this._skinningData) {
+			debugLog(`Mesh #${this._id}: Cannot register skinned - missing positions or skinning data`);
+			return;
+		}
+
+		this._workerPool = pool;
+
+		// Transfer copies to the worker (original stays for sync fallback)
+		const positionsCopy = new Float32Array(this._originalPositions);
+		const jointsCopy = this._skinningData.joints instanceof Uint16Array
+			? new Uint16Array(this._skinningData.joints)
+			: new Uint8Array(this._skinningData.joints);
+		const weightsCopy = new Float32Array(this._skinningData.weights);
+
+		pool.registerSkinnedMesh(this._id, positionsCopy, jointsCopy, weightsCopy, (skinnedPositions) => {
+			this._applyPositions(skinnedPositions);
+		});
+
+		this._isRegisteredSkinnedWithPool = true;
+		debugLog(`Mesh #${this._id}: Registered skinned mesh with worker pool`);
+	}
+
+	/**
+	 * Check if this mesh is registered for worker skinning.
+	 */
+	get isRegisteredSkinnedWithPool(): boolean {
+		return this._isRegisteredSkinnedWithPool;
 	}
 
 	/**
@@ -298,10 +334,11 @@ export class GltfMesh {
 	release(): void {
 		debugLog(`Mesh #${this._id}: Releasing GPU resources`);
 
-		// Unregister from worker pool if registered
-		if (this._workerPool && this._isRegisteredWithPool) {
+		// Unregister from worker pool if registered (handles both regular and skinned)
+		if (this._workerPool && (this._isRegisteredWithPool || this._isRegisteredSkinnedWithPool)) {
 			this._workerPool.unregisterMesh(this._id);
 			this._isRegisteredWithPool = false;
+			this._isRegisteredSkinnedWithPool = false;
 		}
 		this._workerPool = null;
 

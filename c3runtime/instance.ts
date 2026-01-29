@@ -232,11 +232,22 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 	/**
 	 * Push skinned positions from animation controller to mesh GPU buffers.
+	 * Uses worker-based skinning when available, falls back to main thread.
 	 */
 	_updateSkinnedMeshes(): void
 	{
 		if (!this._animationController || !this._model) return;
 
+		// Use worker skinning if available (offloads CPU skinning to workers)
+		if (this._model.hasWorkerSkinning)
+		{
+			// Queue bone matrices to workers - skinning happens in parallel
+			// Results are applied via callbacks during SharedWorkerPool.flushIfPending() in _tick2()
+			this._model.queueSkinning(this._animationController.getBoneMatrices());
+			return;
+		}
+
+		// Fallback: main thread skinning
 		const meshes = this._model.meshes;
 		if (!meshes) return;
 
@@ -409,6 +420,16 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		return this._model?.getWorkerCount() ?? 0;
 	}
 
+	_isUsingWorkerSkinning(): boolean
+	{
+		return this._model?.hasWorkerSkinning ?? false;
+	}
+
+	_getWorkerSkinningEnabled(): number
+	{
+		return this._isUsingWorkerSkinning() ? 1 : 0;
+	}
+
 	_getTotalVertices(): number
 	{
 		return this._model?.getStats().totalVertices ?? 0;
@@ -472,6 +493,13 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				animations: [...this._model.animations],
 				meshes: animMeshes
 			});
+
+			// Enable worker skinning if available (skip redundant main thread skinning)
+			if (this._model.hasWorkerSkinning)
+			{
+				this._animationController.useWorkerSkinning = true;
+				modelLoadLog("Worker skinning enabled for animation controller");
+			}
 
 			// Set up onComplete callback to trigger condition
 			this._animationController.onComplete = () =>

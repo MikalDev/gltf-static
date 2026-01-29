@@ -385,10 +385,13 @@ export class GltfModel {
 			this._workerPool = SharedWorkerPool.acquire();
 			this._useWorkers = true;
 
-			// Register all meshes with pool
+			// Register all meshes with pool (regular transforms)
 			for (const mesh of this._meshes) {
 				mesh.registerWithPool(this._workerPool);
 			}
+
+			// Register skinned meshes with pool (for worker skinning)
+			this._registerSkinnedMeshesWithPool();
 
 			debugLog(`Using shared worker pool (${this._workerPool.workerCount} workers), ${this._meshes.length} meshes registered`);
 		} catch (err) {
@@ -396,6 +399,63 @@ export class GltfModel {
 			this._useWorkers = false;
 			this._workerPool = null;
 		}
+	}
+
+	/**
+	 * Register all skinned meshes with the worker pool for worker-based skinning.
+	 */
+	private _registerSkinnedMeshesWithPool(): void {
+		if (!this._workerPool) return;
+
+		let skinnedCount = 0;
+		for (const mesh of this._meshes) {
+			if (mesh.isSkinned) {
+				mesh.registerSkinnedWithPool(this._workerPool);
+				skinnedCount++;
+			}
+		}
+
+		if (skinnedCount > 0) {
+			debugLog(`Registered ${skinnedCount} skinned meshes for worker skinning`);
+		}
+	}
+
+	/**
+	 * Queue worker-based skinning for all skinned meshes using the given bone matrices.
+	 * Call this after AnimationController.update() to offload skinning to workers.
+	 * @param boneMatrices Bone matrices from AnimationController.getBoneMatrices()
+	 */
+	queueSkinning(boneMatrices: Float32Array): void {
+		if (!this._workerPool || !this._useWorkers) return;
+
+		// Collect IDs of all skinned meshes registered with pool
+		const meshIds: number[] = [];
+		for (const mesh of this._meshes) {
+			if (mesh.isSkinned && mesh.isRegisteredSkinnedWithPool) {
+				meshIds.push(mesh.id);
+			}
+		}
+
+		if (meshIds.length === 0) return;
+
+		// Queue skinning with shared bone matrices
+		this._workerPool.queueSkinning(meshIds, boneMatrices);
+
+		// Schedule flush for end of frame
+		SharedWorkerPool.scheduleFlush();
+	}
+
+	/**
+	 * Check if worker skinning is available for this model.
+	 */
+	get hasWorkerSkinning(): boolean {
+		if (!this._workerPool || !this._useWorkers) return false;
+		for (const mesh of this._meshes) {
+			if (mesh.isSkinned && mesh.isRegisteredSkinnedWithPool) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -425,10 +485,13 @@ export class GltfModel {
 				this._workerPool = SharedWorkerPool.acquire();
 				this._useWorkers = true;
 
-				// Re-register all meshes with shared pool
+				// Re-register all meshes with shared pool (regular transforms)
 				for (const mesh of this._meshes) {
 					mesh.registerWithPool(this._workerPool);
 				}
+
+				// Re-register skinned meshes for worker skinning
+				this._registerSkinnedMeshesWithPool();
 
 				debugLog(`Workers enabled using shared pool (${this._workerPool.workerCount} workers)`);
 			} catch (err) {
