@@ -33,6 +33,7 @@ export class GltfMesh {
 
 	// Lighting dirty tracking
 	private _lastLightingVersion: number = -1;
+	private _lastRotationMatrix: Float32Array | null = null;
 	// Track if lighting was applied by worker (skip main thread recalc)
 	private _workerLightingApplied: boolean = false;
 
@@ -477,10 +478,13 @@ export class GltfMesh {
 		}
 
 		const currentVersion = getLightingVersion();
-		if (!force && this._lastLightingVersion === currentVersion) {
-			return; // Lighting unchanged, skip
+		const rotationChanged = this._hasRotationChanged(modelRotation);
+
+		if (!force && this._lastLightingVersion === currentVersion && !rotationChanged) {
+			return; // Neither lighting nor rotation changed, skip
 		}
 		this._lastLightingVersion = currentVersion;
+		this._updateLastRotation(modelRotation);
 
 		calculateMeshLighting(
 			this._transformedNormals,
@@ -493,11 +497,41 @@ export class GltfMesh {
 	}
 
 	/**
+	 * Check if rotation matrix changed from last applied.
+	 */
+	private _hasRotationChanged(modelRotation?: Float32Array | null): boolean {
+		if (!modelRotation && !this._lastRotationMatrix) return false;
+		if (!modelRotation || !this._lastRotationMatrix) return true;
+
+		// Compare relevant rotation elements (upper-left 3x3 of 4x4 matrix)
+		const indices = [0, 1, 2, 4, 5, 6, 8, 9, 10];
+		for (const i of indices) {
+			if (Math.abs(this._lastRotationMatrix[i] - modelRotation[i]) > 0.0001) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Store copy of rotation matrix for dirty checking.
+	 */
+	private _updateLastRotation(modelRotation?: Float32Array | null): void {
+		if (!modelRotation) {
+			this._lastRotationMatrix = null;
+			return;
+		}
+		if (!this._lastRotationMatrix) {
+			this._lastRotationMatrix = new Float32Array(16);
+		}
+		this._lastRotationMatrix.set(modelRotation);
+	}
+
+	/**
 	 * Mark lighting as dirty so it recalculates next frame.
 	 * Call when mesh normals change (e.g., after skinning).
 	 */
 	invalidateLighting(): void {
 		this._lastLightingVersion = -1;
+		this._lastRotationMatrix = null;
 	}
 
 	/**
@@ -561,6 +595,7 @@ export class GltfMesh {
 		this._hasNormals = false;
 		this._lastMatrix = null;
 		this._lastLightingVersion = -1;
+		this._lastRotationMatrix = null;
 		this._workerLightingApplied = false;
 		this._vertexCount = 0;
 
