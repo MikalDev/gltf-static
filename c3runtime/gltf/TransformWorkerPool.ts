@@ -38,6 +38,89 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 	}
 }
 
+// Calculate vertex lighting from normals and light configuration
+// normals: skinned normals in model space (3 floats per vertex)
+// outColors: output RGBA colors (4 floats per vertex)
+// normalOffset: offset in normals buffer (in floats, i.e., vertex * 3)
+// colorOffset: offset in colors buffer (in floats, i.e., vertex * 4)
+// modelRotation: optional 4x4 or 3x3 matrix to transform normals to world space
+// lightConfig: { ambient: [r,g,b], lights: [{enabled, color, intensity, direction},...] }
+function calculateLighting(normals, outColors, normalOffset, colorOffset, vertexCount, modelRotation, lightConfig) {
+	const ambient = lightConfig.ambient;
+	const lights = lightConfig.lights;
+
+	// Extract rotation matrix components if provided
+	const hasRotation = modelRotation && modelRotation.length >= 9;
+	let m00 = 1, m01 = 0, m02 = 0;
+	let m10 = 0, m11 = 1, m12 = 0;
+	let m20 = 0, m21 = 0, m22 = 1;
+
+	if (hasRotation) {
+		if (modelRotation.length >= 16) {
+			// 4x4 matrix (column-major like gl-matrix)
+			m00 = modelRotation[0]; m01 = modelRotation[4]; m02 = modelRotation[8];
+			m10 = modelRotation[1]; m11 = modelRotation[5]; m12 = modelRotation[9];
+			m20 = modelRotation[2]; m21 = modelRotation[6]; m22 = modelRotation[10];
+		} else {
+			// 3x3 matrix (row-major)
+			m00 = modelRotation[0]; m01 = modelRotation[1]; m02 = modelRotation[2];
+			m10 = modelRotation[3]; m11 = modelRotation[4]; m12 = modelRotation[5];
+			m20 = modelRotation[6]; m21 = modelRotation[7]; m22 = modelRotation[8];
+		}
+	}
+
+	for (let i = 0; i < vertexCount; i++) {
+		const off3 = normalOffset + i * 3;
+		const off4 = colorOffset + i * 4;
+
+		// Start with ambient
+		let r = ambient[0];
+		let g = ambient[1];
+		let b = ambient[2];
+
+		// Normal components (model space)
+		let nx = normals[off3];
+		let ny = normals[off3 + 1];
+		let nz = normals[off3 + 2];
+
+		// Transform normal to world space if rotation provided
+		if (hasRotation) {
+			const wnx = m00 * nx + m01 * ny + m02 * nz;
+			const wny = m10 * nx + m11 * ny + m12 * nz;
+			const wnz = m20 * nx + m21 * ny + m22 * nz;
+			// Renormalize in case of non-uniform scale
+			const len = Math.sqrt(wnx * wnx + wny * wny + wnz * wnz);
+			if (len > 0.0001) {
+				nx = wnx / len;
+				ny = wny / len;
+				nz = wnz / len;
+			}
+		}
+
+		// Accumulate contribution from all enabled lights
+		for (let j = 0; j < lights.length; j++) {
+			const light = lights[j];
+			if (!light.enabled) continue;
+
+			// N dot L (both normalized, direction is TO light)
+			const NdotL = nx * light.direction[0] + ny * light.direction[1] + nz * light.direction[2];
+
+			if (NdotL > 0) {
+				const contrib = NdotL * light.intensity;
+				r += light.color[0] * contrib;
+				g += light.color[1] * contrib;
+				b += light.color[2] * contrib;
+			}
+		}
+
+		// Write output (clamped, alpha = 1)
+		outColors[off4] = r > 1 ? 1 : r;
+		outColors[off4 + 1] = g > 1 ? 1 : g;
+		outColors[off4 + 2] = b > 1 ? 1 : b;
+		outColors[off4 + 3] = 1;
+	}
+}
+
 // Apply CPU skinning to positions and normals
 // boneMatrices: flattened array of 4x4 matrices (16 floats per bone)
 // joints: per-vertex joint indices (4 per vertex)
@@ -191,31 +274,36 @@ self.onmessage = (e) => {
 			// Process skinning for multiple meshes sharing the same bone matrices
 			const boneMatrices = msg.boneMatrices;
 			const requestedMeshIds = msg.meshIds;
+			const lightConfig = msg.lightConfig; // Optional: { ambient, lights, modelRotation }
 
 			// Calculate total size and check if any mesh has normals
 			let totalFloats = 0;
+			let totalVertices = 0;
 			let hasAnyNormals = false;
 			const meshEntries = [];
 			for (const meshId of requestedMeshIds) {
 				const entry = skinnedMeshCache.get(meshId);
 				if (!entry) continue;
 				totalFloats += entry.floatCount;
+				totalVertices += entry.vertexCount;
 				if (entry.normals) hasAnyNormals = true;
 				meshEntries.push({ meshId, entry });
 			}
 
 			if (meshEntries.length === 0) {
-				self.postMessage({ type: "SKIN_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0), normals: null }, []);
+				self.postMessage({ type: "SKIN_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0), normals: null, colors: null }, []);
 				break;
 			}
 
 			// Allocate packed buffers
 			const packedPositions = new Float32Array(totalFloats);
 			const packedNormals = hasAnyNormals ? new Float32Array(totalFloats) : null;
+			const packedColors = (lightConfig && hasAnyNormals) ? new Float32Array(totalVertices * 4) : null;
 			const offsets = new Uint32Array(meshEntries.length + 1);
 			const meshIds = new Uint32Array(meshEntries.length);
 
 			let offset = 0;
+			let colorOffset = 0;
 			for (let i = 0; i < meshEntries.length; i++) {
 				const { meshId, entry } = meshEntries[i];
 
@@ -226,17 +314,28 @@ self.onmessage = (e) => {
 					offset, boneMatrices, entry.joints, entry.weights, entry.vertexCount
 				);
 
+				// Calculate lighting if config provided and mesh has normals
+				if (packedColors && packedNormals && entry.normals) {
+					calculateLighting(
+						packedNormals, packedColors,
+						offset, colorOffset, entry.vertexCount,
+						lightConfig.modelRotation, lightConfig
+					);
+				}
+
 				meshIds[i] = meshId;
 				offsets[i] = offset;
 				offset += entry.floatCount;
+				colorOffset += entry.vertexCount * 4;
 			}
 			offsets[meshEntries.length] = offset;
 
 			const transferList = [packedPositions.buffer, meshIds.buffer, offsets.buffer];
 			if (packedNormals) transferList.push(packedNormals.buffer);
+			if (packedColors) transferList.push(packedColors.buffer);
 
 			self.postMessage(
-				{ type: "SKIN_RESULTS", meshIds, offsets, positions: packedPositions, normals: packedNormals },
+				{ type: "SKIN_RESULTS", meshIds, offsets, positions: packedPositions, normals: packedNormals, colors: packedColors },
 				transferList
 			);
 			break;
@@ -258,7 +357,19 @@ self.onmessage = (e) => {
 `;
 
 type TransformCallback = (positions: Float32Array) => void;
-type SkinningCallback = (positions: Float32Array, normals: Float32Array | null) => void;
+type SkinningCallback = (positions: Float32Array, normals: Float32Array | null, colors: Float32Array | null) => void;
+
+/** Light configuration for worker-based lighting calculation */
+export interface WorkerLightConfig {
+	ambient: Float32Array | number[];
+	lights: Array<{
+		enabled: boolean;
+		color: Float32Array | number[];
+		intensity: number;
+		direction: Float32Array | number[];
+	}>;
+	modelRotation?: Float32Array | null;
+}
 
 interface MeshRegistration {
 	workerIndex: number;
@@ -279,6 +390,7 @@ interface PendingRequest {
 interface PendingSkinRequest {
 	meshIds: number[];
 	boneMatrices: Float32Array;
+	lightConfig?: WorkerLightConfig;
 }
 
 interface PendingResult {
@@ -286,6 +398,7 @@ interface PendingResult {
 	offsets: Uint32Array;
 	positions: Float32Array;
 	normals: Float32Array | null;
+	colors: Float32Array | null;
 	isSkinning: boolean;
 }
 
@@ -414,8 +527,9 @@ export class TransformWorkerPool {
 	 * This is efficient when multiple meshes use the same skeleton (body, clothes, etc).
 	 * @param meshIds Array of mesh IDs to skin
 	 * @param boneMatrices Bone matrices (16 floats per joint, flattened)
+	 * @param lightConfig Optional lighting configuration to compute vertex colors in worker
 	 */
-	queueSkinning(meshIds: number[], boneMatrices: Float32Array): void {
+	queueSkinning(meshIds: number[], boneMatrices: Float32Array, lightConfig?: WorkerLightConfig): void {
 		if (this._disposed) return;
 		if (meshIds.length === 0) return;
 
@@ -439,7 +553,8 @@ export class TransformWorkerPool {
 		for (const [workerIndex, workerMeshIds] of byWorker) {
 			this._pendingSkinByWorker.get(workerIndex)!.push({
 				meshIds: workerMeshIds,
-				boneMatrices: new Float32Array(boneMatrices) // Copy to avoid caller reuse issues
+				boneMatrices: new Float32Array(boneMatrices), // Copy to avoid caller reuse issues
+				lightConfig
 			});
 		}
 	}
@@ -472,7 +587,8 @@ export class TransformWorkerPool {
 				this._workers[i].postMessage({
 					type: "SKIN_BATCH",
 					meshIds: skinReq.meshIds,
-					boneMatrices: skinReq.boneMatrices
+					boneMatrices: skinReq.boneMatrices,
+					lightConfig: skinReq.lightConfig
 				});
 			}
 			this._pendingSkinByWorker.set(i, []); // Clear pending
@@ -494,6 +610,7 @@ export class TransformWorkerPool {
 		offsets?: Uint32Array;
 		positions?: Float32Array;
 		normals?: Float32Array | null;
+		colors?: Float32Array | null;
 	}): void {
 		const isTransformResult = msg.type === "TRANSFORM_RESULTS";
 		const isSkinResult = msg.type === "SKIN_RESULTS";
@@ -505,6 +622,7 @@ export class TransformWorkerPool {
 				offsets: msg.offsets,
 				positions: msg.positions,
 				normals: msg.normals ?? null,
+				colors: msg.colors ?? null,
 				isSkinning: isSkinResult
 			});
 
@@ -530,12 +648,17 @@ export class TransformWorkerPool {
 	 */
 	private _invokeAllCallbacks(): void {
 		for (const result of this._pendingResults) {
-			const { meshIds, offsets, positions, normals, isSkinning } = result;
+			const { meshIds, offsets, positions, normals, colors, isSkinning } = result;
+
+			// Colors have 4 floats per vertex (RGBA) vs 3 for positions/normals
+			// Track color offset separately based on vertex count
+			let colorOffset = 0;
 
 			for (let i = 0; i < meshIds.length; i++) {
 				const meshId = meshIds[i];
 				const start = offsets[i];
 				const end = offsets[i + 1];
+				const vertexCount = (end - start) / 3;
 
 				// Create view into packed buffer (no copy)
 				const meshPositions = positions.subarray(start, end);
@@ -545,7 +668,9 @@ export class TransformWorkerPool {
 					if (registration) {
 						// Only pass normals if this mesh was registered with normals
 						const meshNormals = (normals && registration.hasNormals) ? normals.subarray(start, end) : null;
-						registration.callback(meshPositions, meshNormals);
+						// Pass colors if available (4 floats per vertex)
+						const meshColors = colors ? colors.subarray(colorOffset, colorOffset + vertexCount * 4) : null;
+						registration.callback(meshPositions, meshNormals, meshColors);
 					}
 				} else {
 					const registration = this._meshRegistry.get(meshId);
@@ -553,6 +678,8 @@ export class TransformWorkerPool {
 						registration.callback(meshPositions);
 					}
 				}
+
+				colorOffset += vertexCount * 4;
 			}
 		}
 
@@ -643,10 +770,8 @@ class SharedWorkerPool {
 	static acquire(): TransformWorkerPool {
 		if (!SharedWorkerPool._instance) {
 			SharedWorkerPool._instance = new TransformWorkerPool();
-			debugLog(`Created shared pool with ${SharedWorkerPool._instance.workerCount} workers`);
 		}
 		SharedWorkerPool._refCount++;
-		debugLog(`Acquired (refCount: ${SharedWorkerPool._refCount})`);
 		return SharedWorkerPool._instance;
 	}
 
@@ -657,11 +782,9 @@ class SharedWorkerPool {
 		if (SharedWorkerPool._refCount <= 0) return;
 
 		SharedWorkerPool._refCount--;
-		debugLog(`Released (refCount: ${SharedWorkerPool._refCount})`);
 
 		if (SharedWorkerPool._refCount === 0 && SharedWorkerPool._instance) {
 			SharedWorkerPool._flushScheduled = false;
-			debugLog(`Disposing shared pool (no more references)`);
 			SharedWorkerPool._instance.dispose();
 			SharedWorkerPool._instance = null;
 		}

@@ -1,7 +1,7 @@
 import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root, Skin, Animation } from "@gltf-transform/core";
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
-import { TransformWorkerPool, SharedWorkerPool } from "./TransformWorkerPool.js";
+import { TransformWorkerPool, SharedWorkerPool, WorkerLightConfig } from "./TransformWorkerPool.js";
 import {
 	modelCache,
 	CachedModelData,
@@ -429,8 +429,9 @@ export class GltfModel {
 	 * Queue worker-based skinning for all skinned meshes using the given bone matrices.
 	 * Call this after AnimationController.update() to offload skinning to workers.
 	 * @param boneMatrices Bone matrices from AnimationController.getBoneMatrices()
+	 * @param lightConfig Optional lighting configuration to compute vertex colors in worker
 	 */
-	queueSkinning(boneMatrices: Float32Array): void {
+	queueSkinning(boneMatrices: Float32Array, lightConfig?: WorkerLightConfig): void {
 		if (!this._workerPool || !this._useWorkers) return;
 
 		// Collect IDs of all skinned meshes registered with pool
@@ -443,8 +444,8 @@ export class GltfModel {
 
 		if (meshIds.length === 0) return;
 
-		// Queue skinning with shared bone matrices
-		this._workerPool.queueSkinning(meshIds, boneMatrices);
+		// Queue skinning with shared bone matrices and optional lighting
+		this._workerPool.queueSkinning(meshIds, boneMatrices, lightConfig);
 
 		// Schedule flush for end of frame
 		SharedWorkerPool.scheduleFlush();

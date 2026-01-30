@@ -290,6 +290,26 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	}
 
 	/**
+	 * Build lighting configuration for worker-based lighting calculation.
+	 */
+	_buildLightConfig(): { ambient: Float32Array; lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array }>; modelRotation: Float32Array } | undefined
+	{
+		const lights = Lighting.getAllLights();
+		if (lights.length === 0) return undefined;
+
+		return {
+			ambient: Lighting.getAmbientLight(),
+			lights: lights.map(l => ({
+				enabled: l.enabled,
+				color: l.color,
+				intensity: l.intensity,
+				direction: l.direction
+			})),
+			modelRotation: this._buildModelRotationMatrix()
+		};
+	}
+
+	/**
 	 * Push skinned positions from animation controller to mesh GPU buffers.
 	 * Uses worker-based skinning when available, falls back to main thread.
 	 */
@@ -300,7 +320,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Use worker skinning if available (handles both positions and normals)
 		if (this._model.hasWorkerSkinning)
 		{
-			this._model.queueSkinning(this._animationController.getBoneMatrices());
+			const lightConfig = this._buildLightConfig();
+			this._model.queueSkinning(this._animationController.getBoneMatrices(), lightConfig);
 			return;
 		}
 

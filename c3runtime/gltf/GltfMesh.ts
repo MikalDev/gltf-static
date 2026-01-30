@@ -33,6 +33,8 @@ export class GltfMesh {
 
 	// Lighting dirty tracking
 	private _lastLightingVersion: number = -1;
+	// Track if lighting was applied by worker (skip main thread recalc)
+	private _workerLightingApplied: boolean = false;
 
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
@@ -103,9 +105,6 @@ export class GltfMesh {
 	setSkinningData(skinningData: MeshSkinningData | null, skinData: CachedSkinData | null): void {
 		this._skinningData = skinningData;
 		this._skinData = skinData;
-		if (skinningData && skinData) {
-			debugLog(`Mesh #${this._id}: Skinning data set (${skinData.joints.length} joints)`);
-		}
 	}
 
 	/**
@@ -125,8 +124,7 @@ export class GltfMesh {
 		const indexCount = indices.length;
 		const expectedTexCoordLength = this._vertexCount * 2;
 
-		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"}, normals: ${normals ? "yes" : "no"})`);
-		debugLog(`Mesh #${this._id}: positions.length=${positions.length}, texCoords.length=${texCoords?.length}, expected texCoords=${expectedTexCoordLength}`);
+		debugLog(`Mesh #${this._id}: Creating (${this._vertexCount} verts, texture: ${texture ? "yes" : "no"}, normals: ${normals ? "yes" : "no"})`);
 
 		// Store original positions for sync transform fallback
 		this._originalPositions = new Float32Array(positions);
@@ -152,32 +150,25 @@ export class GltfMesh {
 		// Upload positions (x, y, z per vertex)
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
-		debugLog(`Mesh #${this._id}: markDataChanged("positions") - initial upload`);
 
 		// Upload UVs (u, v per vertex) - default to 0,0 if not present
 		if (texCoords) {
-			debugLog(`Mesh #${this._id}: meshData.texCoords.length=${this._meshData.texCoords.length}`);
-			// Verify lengths match
 			if (texCoords.length !== this._meshData.texCoords.length) {
-				debugLog(`Mesh #${this._id}: WARNING - texCoords length mismatch! source=${texCoords.length}, target=${this._meshData.texCoords.length}`);
+				console.warn(`${LOG_PREFIX} Mesh #${this._id}: texCoords length mismatch`);
 			}
 			this._meshData.texCoords.set(texCoords);
 		} else {
-			// Initialize UVs to 0,0 to avoid garbage values
 			this._meshData.texCoords.fill(0);
 		}
 		this._meshData.markDataChanged("texCoords", 0, this._vertexCount);
-		debugLog(`Mesh #${this._id}: markDataChanged("texCoords") - initial upload`);
 
 		// Upload indices
 		this._meshData.indices.set(indices);
 		this._meshData.markIndexDataChanged();
-		debugLog(`Mesh #${this._id}: markIndexDataChanged() - initial upload`);
 
 		// Fill vertex colors with white (unlit rendering)
 		this._meshData.fillColor(1, 1, 1, 1);
 		this._meshData.markDataChanged("colors", 0, this._vertexCount);
-		debugLog(`Mesh #${this._id}: markDataChanged("colors") - initial upload`);
 
 		this._texture = texture;
 	}
@@ -234,7 +225,6 @@ export class GltfMesh {
 			}
 		}
 
-		debugLog(`Mesh #${this._id}: Computed ${vertexCount} normals from triangles`);
 		return normals;
 	}
 
@@ -254,7 +244,6 @@ export class GltfMesh {
 		});
 
 		this._isRegisteredWithPool = true;
-		debugLog(`Mesh #${this._id}: Registered with worker pool`);
 	}
 
 	/**
@@ -263,10 +252,7 @@ export class GltfMesh {
 	 */
 	registerSkinnedWithPool(pool: TransformWorkerPool): void {
 		if (this._isRegisteredSkinnedWithPool) return;
-		if (!this._originalPositions || !this._skinningData) {
-			debugLog(`Mesh #${this._id}: Cannot register skinned - missing positions or skinning data`);
-			return;
-		}
+		if (!this._originalPositions || !this._skinningData) return;
 
 		this._workerPool = pool;
 
@@ -278,18 +264,18 @@ export class GltfMesh {
 			: new Uint8Array(this._skinningData.joints);
 		const weightsCopy = new Float32Array(this._skinningData.weights);
 
-		pool.registerSkinnedMesh(this._id, positionsCopy, normalsCopy, jointsCopy, weightsCopy, (skinnedPositions, skinnedNormals) => {
+		pool.registerSkinnedMesh(this._id, positionsCopy, normalsCopy, jointsCopy, weightsCopy, (skinnedPositions, skinnedNormals, skinnedColors) => {
 			this._applyPositions(skinnedPositions);
 			if (skinnedNormals) {
 				this._applyNormals(skinnedNormals);
-				debugLog(`Mesh #${this._id}: Applied skinned normals (${skinnedNormals.length} floats)`);
-			} else {
-				debugLog(`Mesh #${this._id}: No skinned normals received`);
+			}
+			if (skinnedColors) {
+				this._applyColors(skinnedColors);
+				this._workerLightingApplied = true;
 			}
 		});
 
 		this._isRegisteredSkinnedWithPool = true;
-		debugLog(`Mesh #${this._id}: Registered skinned mesh with worker pool (normals: ${normalsCopy ? 'yes' : 'no'})`);
 	}
 
 	/**
@@ -314,7 +300,6 @@ export class GltfMesh {
 		if (!this._meshData) return;
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
-		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - worker transform`);
 	}
 
 	/**
@@ -324,6 +309,15 @@ export class GltfMesh {
 		if (!this._transformedNormals || !this._hasNormals) return;
 		this._transformedNormals.set(normals);
 		this.invalidateLighting();
+	}
+
+	/**
+	 * Apply vertex colors received from worker.
+	 */
+	private _applyColors(colors: Float32Array): void {
+		if (!this._meshData) return;
+		this._meshData.colors.set(colors);
+		this._meshData.markDataChanged("colors", 0, this._vertexCount);
 	}
 
 	/**
@@ -376,7 +370,6 @@ export class GltfMesh {
 		}
 
 		this._meshData.markDataChanged("positions", 0, n);
-		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - sync transform`);
 	}
 
 	/**
@@ -403,7 +396,6 @@ export class GltfMesh {
 
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
-		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - skinned positions`);
 
 		// Clear last matrix since we're using raw positions now
 		this._lastMatrix = null;
@@ -470,12 +462,19 @@ export class GltfMesh {
 	 * Apply vertex lighting based on transformed normals.
 	 * Updates vertex colors in the mesh data.
 	 * Skips recalculation if lighting hasn't changed (dirty tracking).
+	 * Skips if worker already applied lighting this frame.
 	 *
 	 * @param modelRotation Optional model rotation matrix (4x4 mat4) to transform normals to world space
 	 * @param force If true, recalculate even if lighting version unchanged
 	 */
 	applyLighting(modelRotation?: Float32Array | null, force: boolean = false): void {
 		if (!this._meshData || !this._hasNormals || !this._transformedNormals) return;
+
+		// Skip if worker already applied lighting this frame
+		if (this._workerLightingApplied) {
+			this._workerLightingApplied = false; // Reset for next frame
+			return;
+		}
 
 		const currentVersion = getLightingVersion();
 		if (!force && this._lastLightingVersion === currentVersion) {
@@ -543,8 +542,6 @@ export class GltfMesh {
 	 * Release GPU resources and unregister from worker pool.
 	 */
 	release(): void {
-		debugLog(`Mesh #${this._id}: Releasing GPU resources`);
-
 		// Unregister from worker pool if registered (handles both regular and skinned)
 		if (this._workerPool && (this._isRegisteredWithPool || this._isRegisteredSkinnedWithPool)) {
 			this._workerPool.unregisterMesh(this._id);
@@ -564,6 +561,7 @@ export class GltfMesh {
 		this._hasNormals = false;
 		this._lastMatrix = null;
 		this._lastLightingVersion = -1;
+		this._workerLightingApplied = false;
 		this._vertexCount = 0;
 
 		// Clear skinning references (not owned, just references to cached data)
