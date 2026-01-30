@@ -4,6 +4,7 @@ import type { GltfMesh as GltfMeshType } from "./gltf/GltfMesh.js";
 import type { SharedWorkerPool as SharedWorkerPoolType } from "./gltf/TransformWorkerPool.js";
 import type { AnimationController as AnimationControllerType } from "./gltf/AnimationController.js";
 import type { mat4 as mat4Type, vec3 as vec3Type, quat as quatType } from "gl-matrix";
+import type * as LightingType from "./gltf/Lighting.js";
 
 // Augment globalThis with GltfBundle type
 declare global {
@@ -15,38 +16,39 @@ declare global {
 		mat4: typeof mat4Type;
 		vec3: typeof vec3Type;
 		quat: typeof quatType;
+		Lighting: typeof LightingType;
 	};
+	// Global debug flag for all glTF modules
+	var gltfDebug: boolean;
 }
 
-// Access bundle from globalThis (C3 worker compatible - no ES module import)
-const { GltfModel, GltfMesh, SharedWorkerPool, AnimationController, mat4, vec3 } = globalThis.GltfBundle;
+// Initialize global debug flag (off by default)
+globalThis.gltfDebug = false;
 
-// Debug logging - set to false to disable
-const DEBUG = false;
+// Access bundle from globalThis (C3 worker compatible - no ES module import)
+const { GltfModel, GltfMesh, SharedWorkerPool, AnimationController, mat4, vec3, Lighting } = globalThis.GltfBundle;
+
 const LOG_PREFIX = "[GltfStatic]";
 
-// Model loading debug - set to true to enable verbose model loading logs
-const modelLoadDebug = false;
-
 function debugLog(...args: unknown[]): void {
-	if (DEBUG) console.log(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.log(LOG_PREFIX, ...args);
 }
 
 function debugWarn(...args: unknown[]): void {
-	if (DEBUG) console.warn(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.warn(LOG_PREFIX, ...args);
 }
 
 function debugError(...args: unknown[]): void {
-	// Always log errors, but add prefix only in debug mode
+	// Always log errors
 	console.error(LOG_PREFIX, ...args);
 }
 
 function modelLoadLog(...args: unknown[]): void {
-	if (modelLoadDebug) console.log(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.log(LOG_PREFIX, ...args);
 }
 
 function modelLoadWarn(...args: unknown[]): void {
-	if (modelLoadDebug) console.warn(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.warn(LOG_PREFIX, ...args);
 }
 
 // Property indices (link properties are excluded from _getInitProperties)
@@ -61,6 +63,7 @@ const PROP_SCALE = 4;
 const tempMatrix = mat4.create();
 const tempVec = vec3.create();
 const savedMV = new Float32Array(16);
+const modelRotationMatrix = mat4.create(); // For lighting normal transformation
 
 // Degrees to radians conversion factor
 const DEG_TO_RAD = Math.PI / 180;
@@ -75,6 +78,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_scaleX: number = 1;
 	_scaleY: number = 1;
 	_scaleZ: number = 1;
+	_debug: boolean = false;
 
 	// glTF model
 	_model: GltfModelType | null = null;
@@ -218,16 +222,71 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	{
 		if (!this._model?.isLoaded) return;
 
-		// Update animation if playing (use C3 SDK's delta time)
+		// Update animation if playing
 		if (this._animationController?.isPlaying())
 		{
 			this._animationController.update(this.runtime.dt);
-
-			// Push skinned positions to GPU
 			this._updateSkinnedMeshes();
 		}
 
+		// Apply lighting to all meshes (uses dirty tracking - skips if unchanged)
+		this._applyLightingToAllMeshes();
+
 		this.runtime.sdk.updateRender();
+	}
+
+	/**
+	 * Build rotation-only matrix from instance rotations (for lighting normal transform).
+	 * Includes angle (C3 rotation) + rotationX/Y/Z + scale.
+	 */
+	_buildModelRotationMatrix(): Float32Array
+	{
+		mat4.identity(modelRotationMatrix);
+
+		// Apply rotations in same order as _buildModelViewMatrix
+		if (this.angle !== 0)
+		{
+			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this.angle);
+		}
+		if (this._rotationX !== 0)
+		{
+			mat4.rotateX(modelRotationMatrix, modelRotationMatrix, this._rotationX * DEG_TO_RAD);
+		}
+		if (this._rotationY !== 0)
+		{
+			mat4.rotateY(modelRotationMatrix, modelRotationMatrix, this._rotationY * DEG_TO_RAD);
+		}
+		if (this._rotationZ !== 0)
+		{
+			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this._rotationZ * DEG_TO_RAD);
+		}
+
+		// Include scale (lighting calculation will renormalize)
+		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
+		mat4.scale(modelRotationMatrix, modelRotationMatrix, tempVec);
+
+		return modelRotationMatrix as Float32Array;
+	}
+
+	/**
+	 * Apply lighting to all meshes. Uses dirty tracking internally.
+	 */
+	_applyLightingToAllMeshes(): void
+	{
+		if (!this._model) return;
+		const meshes = this._model.meshes;
+		if (!meshes) return;
+
+		// Build rotation matrix for transforming normals to world space
+		const rotMatrix = this._buildModelRotationMatrix();
+
+		for (const mesh of meshes)
+		{
+			if (mesh.hasNormals)
+			{
+				mesh.applyLighting(rotMatrix);
+			}
+		}
 	}
 
 	/**
@@ -238,27 +297,32 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	{
 		if (!this._animationController || !this._model) return;
 
-		// Use worker skinning if available (offloads CPU skinning to workers)
+		// Use worker skinning if available (handles both positions and normals)
 		if (this._model.hasWorkerSkinning)
 		{
-			// Queue bone matrices to workers - skinning happens in parallel
-			// Results are applied via callbacks during SharedWorkerPool.flushIfPending() in _tick2()
 			this._model.queueSkinning(this._animationController.getBoneMatrices());
 			return;
 		}
 
-		// Fallback: main thread skinning
+		// Main thread skinning
 		const meshes = this._model.meshes;
 		if (!meshes) return;
 
-		// Use _skinnedMeshIndices to map animation controller index to actual mesh index
 		for (let i = 0; i < this._animationController.getMeshCount(); i++)
 		{
 			const meshIndex = this._skinnedMeshIndices[i];
-			const positions = this._animationController.getSkinnedPositions(i);
-			if (meshes[meshIndex])
+			const mesh = meshes[meshIndex];
+			if (!mesh) continue;
+
+			// Update positions
+			mesh.updateSkinnedPositions(this._animationController.getSkinnedPositions(i));
+
+			// Update normals (invalidates lighting cache)
+			const normals = this._animationController.getSkinnedNormals(i);
+			if (normals)
 			{
-				meshes[meshIndex].updateSkinnedPositions(positions);
+				mesh.updateSkinnedNormals(normals);
+				mesh.invalidateLighting(); // Force recalc since normals changed
 			}
 		}
 	}
@@ -465,7 +529,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		if (!meshes || meshes.length === 0) return;
 
 		// Build mesh data for animation controller and track skinned mesh indices
-		const animMeshes: { originalPositions: Float32Array; skinningData: any }[] = [];
+		const animMeshes: { originalPositions: Float32Array; originalNormals?: Float32Array | null; skinningData: any }[] = [];
 		this._skinnedMeshIndices = [];
 		for (let i = 0; i < meshes.length; i++)
 		{
@@ -475,6 +539,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				this._skinnedMeshIndices.push(i);
 				animMeshes.push({
 					originalPositions: mesh.originalPositions,
+					originalNormals: mesh.originalNormals,
 					skinningData: mesh.skinningData
 				});
 			}
@@ -494,12 +559,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				meshes: animMeshes
 			});
 
-			// Enable worker skinning if available (skip redundant main thread skinning)
-			if (this._model.hasWorkerSkinning)
-			{
-				this._animationController.useWorkerSkinning = true;
-				modelLoadLog("Worker skinning enabled for animation controller");
-			}
+			// Force enable worker skinning - workers handle skinning, AnimationController skips main thread skinning
+			this._animationController.useWorkerSkinning = true;
+			console.log("[GltfStatic] Worker skinning FORCED enabled for animation controller");
 
 			// Set up onComplete callback to trigger condition
 			this._animationController.onComplete = () =>
@@ -722,6 +784,124 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		{
 			this._isLoading = false;
 		}
+	}
+
+	// ========================================================================
+	// Lighting Control Methods
+	// ========================================================================
+
+	/**
+	 * Create a directional light (direction TO the light source).
+	 * @returns Light ID
+	 */
+	_createDirectionalLight(dirX: number, dirY: number, dirZ: number): number
+	{
+		return Lighting.createDirectionalLight(dirX, dirY, dirZ);
+	}
+
+	/**
+	 * Enable or disable a light.
+	 */
+	_setLightEnabled(id: number, enabled: boolean): void
+	{
+		Lighting.setLightEnabled(id, enabled);
+	}
+
+	/**
+	 * Check if a light is enabled.
+	 */
+	_isLightEnabled(id: number): boolean
+	{
+		return Lighting.isLightEnabled(id);
+	}
+
+	/**
+	 * Set light color (RGB 0-1).
+	 */
+	_setLightColor(id: number, r: number, g: number, b: number): void
+	{
+		Lighting.setLightColor(id, r, g, b);
+	}
+
+	/**
+	 * Set light intensity.
+	 */
+	_setLightIntensity(id: number, intensity: number): void
+	{
+		Lighting.setLightIntensity(id, intensity);
+	}
+
+	/**
+	 * Set light direction (TO the light, will be normalized).
+	 */
+	_setLightDirection(id: number, x: number, y: number, z: number): void
+	{
+		Lighting.setLightDirection(id, x, y, z);
+	}
+
+	/**
+	 * Remove a light by ID.
+	 */
+	_removeLight(id: number): boolean
+	{
+		return Lighting.removeLight(id);
+	}
+
+	/**
+	 * Remove all lights.
+	 */
+	_removeAllLights(): void
+	{
+		Lighting.removeAllLights();
+	}
+
+	/**
+	 * Set ambient light color (RGB 0-1).
+	 */
+	_setAmbientLight(r: number, g: number, b: number): void
+	{
+		Lighting.setAmbientLight(r, g, b);
+	}
+
+	/**
+	 * Get number of lights.
+	 */
+	_getLightCount(): number
+	{
+		return Lighting.getLightCount();
+	}
+
+	/**
+	 * Check if any lights are enabled.
+	 */
+	_hasEnabledLights(): boolean
+	{
+		return Lighting.hasEnabledLights();
+	}
+
+	// ========================================================================
+	// Debug Control
+	// ========================================================================
+
+	/**
+	 * Enable or disable debug logging for all glTF modules.
+	 */
+	_setDebug(enabled: boolean): void
+	{
+		this._debug = enabled;
+		globalThis.gltfDebug = enabled;
+		if (enabled)
+		{
+			console.log("[GltfStatic] Debug logging enabled");
+		}
+	}
+
+	/**
+	 * Check if debug logging is enabled.
+	 */
+	_getDebug(): boolean
+	{
+		return this._debug;
 	}
 
 	_saveToJson(): JSONValue

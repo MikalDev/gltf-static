@@ -7,12 +7,10 @@
  * - Dependency Inversion: Meshes provide callbacks, pool doesn't know about meshData
  */
 
-// Debug logging
-const DEBUG = false;
 const LOG_PREFIX = "[SharedWorkerPool]";
 
 function debugLog(...args: unknown[]): void {
-	if (DEBUG) console.log(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.log(LOG_PREFIX, ...args);
 }
 
 // Inline worker code as string for blob URL creation (avoids separate file bundling)
@@ -40,23 +38,34 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 	}
 }
 
-// Apply CPU skinning: transform vertices by weighted blend of bone matrices
+// Apply CPU skinning to positions and normals
 // boneMatrices: flattened array of 4x4 matrices (16 floats per bone)
-// joints: per-vertex joint indices (4 per vertex, Uint8Array or Uint16Array)
-// weights: per-vertex weights (4 per vertex, Float32Array)
-function skinVerticesInto(original, output, offset, boneMatrices, joints, weights, vertexCount) {
+// joints: per-vertex joint indices (4 per vertex)
+// weights: per-vertex weights (4 per vertex)
+function skinMeshInto(origPositions, origNormals, outPositions, outNormals, offset, boneMatrices, joints, weights, vertexCount) {
+	const hasNormals = origNormals !== null && outNormals !== null;
+
 	for (let v = 0; v < vertexCount; v++) {
 		const posOffset = v * 3;
 		const skinOffset = v * 4;
 		const dstOffset = offset + posOffset;
 
 		// Read original position
-		const px = original[posOffset];
-		const py = original[posOffset + 1];
-		const pz = original[posOffset + 2];
+		const px = origPositions[posOffset];
+		const py = origPositions[posOffset + 1];
+		const pz = origPositions[posOffset + 2];
+
+		// Read original normal if available
+		let nx = 0, ny = 0, nz = 0;
+		if (hasNormals) {
+			nx = origNormals[posOffset];
+			ny = origNormals[posOffset + 1];
+			nz = origNormals[posOffset + 2];
+		}
 
 		// Accumulate weighted transforms
-		let rx = 0, ry = 0, rz = 0;
+		let rpx = 0, rpy = 0, rpz = 0;
+		let rnx = 0, rny = 0, rnz = 0;
 
 		for (let j = 0; j < 4; j++) {
 			const weight = weights[skinOffset + j];
@@ -71,15 +80,39 @@ function skinVerticesInto(original, output, offset, boneMatrices, joints, weight
 			const ty = m[boneOffset + 1] * px + m[boneOffset + 5] * py + m[boneOffset + 9] * pz + m[boneOffset + 13];
 			const tz = m[boneOffset + 2] * px + m[boneOffset + 6] * py + m[boneOffset + 10] * pz + m[boneOffset + 14];
 
-			rx += tx * weight;
-			ry += ty * weight;
-			rz += tz * weight;
+			rpx += tx * weight;
+			rpy += ty * weight;
+			rpz += tz * weight;
+
+			// Transform normal by upper-left 3x3 (no translation)
+			if (hasNormals) {
+				const tnx = m[boneOffset + 0] * nx + m[boneOffset + 4] * ny + m[boneOffset + 8] * nz;
+				const tny = m[boneOffset + 1] * nx + m[boneOffset + 5] * ny + m[boneOffset + 9] * nz;
+				const tnz = m[boneOffset + 2] * nx + m[boneOffset + 6] * ny + m[boneOffset + 10] * nz;
+				rnx += tnx * weight;
+				rny += tny * weight;
+				rnz += tnz * weight;
+			}
 		}
 
 		// Write skinned position
-		output[dstOffset] = rx;
-		output[dstOffset + 1] = ry;
-		output[dstOffset + 2] = rz;
+		outPositions[dstOffset] = rpx;
+		outPositions[dstOffset + 1] = rpy;
+		outPositions[dstOffset + 2] = rpz;
+
+		// Write skinned normal (normalized)
+		if (hasNormals) {
+			const len = Math.sqrt(rnx * rnx + rny * rny + rnz * rnz);
+			if (len > 0.0001) {
+				outNormals[dstOffset] = rnx / len;
+				outNormals[dstOffset + 1] = rny / len;
+				outNormals[dstOffset + 2] = rnz / len;
+			} else {
+				outNormals[dstOffset] = 0;
+				outNormals[dstOffset + 1] = 1;
+				outNormals[dstOffset + 2] = 0;
+			}
+		}
 	}
 }
 
@@ -99,13 +132,13 @@ self.onmessage = (e) => {
 		}
 
 		case "REGISTER_SKIN": {
-			// Register a skinned mesh with its bind pose positions and skinning data
-			// joints/weights are NOT transferred (copied) so they persist
+			// Register a skinned mesh with bind pose positions, normals, and skinning data
 			const vertexCount = msg.positions.length / 3;
 			skinnedMeshCache.set(msg.meshId, {
-				original: msg.positions,  // transferred
-				joints: msg.joints,       // transferred
-				weights: msg.weights,     // transferred
+				positions: msg.positions,  // transferred
+				normals: msg.normals || null,  // transferred (optional)
+				joints: msg.joints,        // transferred
+				weights: msg.weights,      // transferred
 				vertexCount,
 				floatCount: msg.positions.length
 			});
@@ -156,28 +189,29 @@ self.onmessage = (e) => {
 
 		case "SKIN_BATCH": {
 			// Process skinning for multiple meshes sharing the same bone matrices
-			// msg.boneMatrices: Float32Array of bone matrices (shared across all meshes)
-			// msg.meshIds: array of mesh IDs to skin
 			const boneMatrices = msg.boneMatrices;
 			const requestedMeshIds = msg.meshIds;
 
-			// Calculate total size and collect valid entries
+			// Calculate total size and check if any mesh has normals
 			let totalFloats = 0;
+			let hasAnyNormals = false;
 			const meshEntries = [];
 			for (const meshId of requestedMeshIds) {
 				const entry = skinnedMeshCache.get(meshId);
 				if (!entry) continue;
 				totalFloats += entry.floatCount;
+				if (entry.normals) hasAnyNormals = true;
 				meshEntries.push({ meshId, entry });
 			}
 
 			if (meshEntries.length === 0) {
-				self.postMessage({ type: "SKIN_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0) }, []);
+				self.postMessage({ type: "SKIN_RESULTS", meshIds: new Uint32Array(0), offsets: new Uint32Array(1), positions: new Float32Array(0), normals: null }, []);
 				break;
 			}
 
-			// Allocate single packed buffer
+			// Allocate packed buffers
 			const packedPositions = new Float32Array(totalFloats);
+			const packedNormals = hasAnyNormals ? new Float32Array(totalFloats) : null;
 			const offsets = new Uint32Array(meshEntries.length + 1);
 			const meshIds = new Uint32Array(meshEntries.length);
 
@@ -185,10 +219,11 @@ self.onmessage = (e) => {
 			for (let i = 0; i < meshEntries.length; i++) {
 				const { meshId, entry } = meshEntries[i];
 
-				// Apply skinning into packed buffer
-				skinVerticesInto(
-					entry.original, packedPositions, offset,
-					boneMatrices, entry.joints, entry.weights, entry.vertexCount
+				// Apply skinning to positions and normals
+				skinMeshInto(
+					entry.positions, entry.normals,
+					packedPositions, packedNormals,
+					offset, boneMatrices, entry.joints, entry.weights, entry.vertexCount
 				);
 
 				meshIds[i] = meshId;
@@ -197,9 +232,12 @@ self.onmessage = (e) => {
 			}
 			offsets[meshEntries.length] = offset;
 
+			const transferList = [packedPositions.buffer, meshIds.buffer, offsets.buffer];
+			if (packedNormals) transferList.push(packedNormals.buffer);
+
 			self.postMessage(
-				{ type: "SKIN_RESULTS", meshIds, offsets, positions: packedPositions },
-				[packedPositions.buffer, meshIds.buffer, offsets.buffer]
+				{ type: "SKIN_RESULTS", meshIds, offsets, positions: packedPositions, normals: packedNormals },
+				transferList
 			);
 			break;
 		}
@@ -220,6 +258,7 @@ self.onmessage = (e) => {
 `;
 
 type TransformCallback = (positions: Float32Array) => void;
+type SkinningCallback = (positions: Float32Array, normals: Float32Array | null) => void;
 
 interface MeshRegistration {
 	workerIndex: number;
@@ -228,7 +267,8 @@ interface MeshRegistration {
 
 interface SkinnedMeshRegistration {
 	workerIndex: number;
-	callback: TransformCallback;
+	callback: SkinningCallback;
+	hasNormals: boolean;
 }
 
 interface PendingRequest {
@@ -245,6 +285,8 @@ interface PendingResult {
 	meshIds: Uint32Array;
 	offsets: Uint32Array;
 	positions: Float32Array;
+	normals: Float32Array | null;
+	isSkinning: boolean;
 }
 
 export class TransformWorkerPool {
@@ -325,19 +367,21 @@ export class TransformWorkerPool {
 
 	/**
 	 * Register a skinned mesh with the pool for CPU skinning.
-	 * Positions, joints, and weights are transferred to worker (zero-copy).
+	 * Positions, normals, joints, and weights are transferred to worker (zero-copy).
 	 * @param meshId Unique mesh identifier
 	 * @param positions Original bind pose positions (will be transferred)
+	 * @param normals Original bind pose normals (will be transferred, optional)
 	 * @param joints Per-vertex joint indices, 4 per vertex (will be transferred)
 	 * @param weights Per-vertex weights, 4 per vertex (will be transferred)
-	 * @param callback Called with skinned positions after flush()
+	 * @param callback Called with skinned positions and normals after flush()
 	 */
 	registerSkinnedMesh(
 		meshId: number,
 		positions: Float32Array,
+		normals: Float32Array | null,
 		joints: Uint8Array | Uint16Array,
 		weights: Float32Array,
-		callback: TransformCallback
+		callback: SkinningCallback
 	): void {
 		if (this._disposed) return;
 
@@ -345,11 +389,13 @@ export class TransformWorkerPool {
 		const workerIndex = this._nextWorkerIndex;
 		this._nextWorkerIndex = (this._nextWorkerIndex + 1) % this._workerCount;
 
-		this._skinnedMeshRegistry.set(meshId, { workerIndex, callback });
+		this._skinnedMeshRegistry.set(meshId, { workerIndex, callback, hasNormals: normals !== null });
 
 		// Transfer all data to worker
 		const transferList: ArrayBuffer[] = [positions.buffer];
-		// Only transfer if not already detached (joints/weights may share buffer)
+		if (normals && normals.buffer.byteLength > 0 && !transferList.includes(normals.buffer)) {
+			transferList.push(normals.buffer);
+		}
 		if (joints.buffer.byteLength > 0 && !transferList.includes(joints.buffer)) {
 			transferList.push(joints.buffer);
 		}
@@ -358,7 +404,7 @@ export class TransformWorkerPool {
 		}
 
 		this._workers[workerIndex].postMessage(
-			{ type: "REGISTER_SKIN", meshId, positions, joints, weights },
+			{ type: "REGISTER_SKIN", meshId, positions, normals, joints, weights },
 			transferList
 		);
 	}
@@ -447,19 +493,20 @@ export class TransformWorkerPool {
 		meshIds?: Uint32Array;
 		offsets?: Uint32Array;
 		positions?: Float32Array;
+		normals?: Float32Array | null;
 	}): void {
 		const isTransformResult = msg.type === "TRANSFORM_RESULTS";
 		const isSkinResult = msg.type === "SKIN_RESULTS";
 
 		if ((isTransformResult || isSkinResult) && msg.positions && msg.meshIds && msg.offsets) {
 			// Collect result for batched processing
-			// Tag result with type so we know which registry to use for callbacks
 			this._pendingResults.push({
 				meshIds: msg.meshIds,
 				offsets: msg.offsets,
 				positions: msg.positions,
+				normals: msg.normals ?? null,
 				isSkinning: isSkinResult
-			} as PendingResult & { isSkinning: boolean });
+			});
 
 			// Check if all pending responses received
 			this._pendingResponses--;
@@ -482,20 +529,29 @@ export class TransformWorkerPool {
 	 * This ensures all GPU uploads happen together.
 	 */
 	private _invokeAllCallbacks(): void {
-		for (const result of this._pendingResults as Array<PendingResult & { isSkinning?: boolean }>) {
-			const { meshIds, offsets, positions, isSkinning } = result;
-			const registry = isSkinning ? this._skinnedMeshRegistry : this._meshRegistry;
+		for (const result of this._pendingResults) {
+			const { meshIds, offsets, positions, normals, isSkinning } = result;
 
 			for (let i = 0; i < meshIds.length; i++) {
 				const meshId = meshIds[i];
 				const start = offsets[i];
 				const end = offsets[i + 1];
 
-				const registration = registry.get(meshId);
-				if (registration) {
-					// Create view into packed buffer (no copy)
-					const meshPositions = positions.subarray(start, end);
-					registration.callback(meshPositions);
+				// Create view into packed buffer (no copy)
+				const meshPositions = positions.subarray(start, end);
+
+				if (isSkinning) {
+					const registration = this._skinnedMeshRegistry.get(meshId);
+					if (registration) {
+						// Only pass normals if this mesh was registered with normals
+						const meshNormals = (normals && registration.hasNormals) ? normals.subarray(start, end) : null;
+						registration.callback(meshPositions, meshNormals);
+					}
+				} else {
+					const registration = this._meshRegistry.get(meshId);
+					if (registration) {
+						registration.callback(meshPositions);
+					}
 				}
 			}
 		}

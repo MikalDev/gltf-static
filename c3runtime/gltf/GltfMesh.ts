@@ -1,13 +1,12 @@
-import { vec3, mat4 } from "gl-matrix";
+import { vec3, mat4, mat3 } from "gl-matrix";
 import type { TransformWorkerPool } from "./TransformWorkerPool.js";
 import type { MeshSkinningData, CachedSkinData } from "./types.js";
+import { calculateMeshLighting, getVersion as getLightingVersion } from "./Lighting.js";
 
-// Debug logging - set to false to disable
-const DEBUG = false;
 const LOG_PREFIX = "[GltfMesh]";
 
 function debugLog(...args: unknown[]): void {
-	if (DEBUG) console.log(LOG_PREFIX, ...args);
+	if (globalThis.gltfDebug) console.log(LOG_PREFIX, ...args);
 }
 
 /**
@@ -24,10 +23,16 @@ export class GltfMesh {
 	// Store original positions for runtime transform updates (sync fallback)
 	// For skinned meshes, these are the bind pose positions
 	private _originalPositions: Float32Array | null = null;
+	private _originalNormals: Float32Array | null = null;
+	private _transformedNormals: Float32Array | null = null;
 	private _vertexCount: number = 0;
+	private _hasNormals: boolean = false;
 
 	// Matrix dirty tracking to avoid redundant GPU uploads
 	private _lastMatrix: Float32Array | null = null;
+
+	// Lighting dirty tracking
+	private _lastLightingVersion: number = -1;
 
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
@@ -61,6 +66,21 @@ export class GltfMesh {
 		return this._originalPositions;
 	}
 
+	/** Get original normals */
+	get originalNormals(): Float32Array | null {
+		return this._originalNormals;
+	}
+
+	/** Get transformed normals (after skinning/transform) */
+	get transformedNormals(): Float32Array | null {
+		return this._transformedNormals;
+	}
+
+	/** Whether this mesh has normals */
+	get hasNormals(): boolean {
+		return this._hasNormals;
+	}
+
 	/** Whether this mesh has skinning data */
 	get isSkinned(): boolean {
 		return this._skinningData !== null && this._skinData !== null;
@@ -91,23 +111,41 @@ export class GltfMesh {
 	/**
 	 * Create GPU buffers and upload mesh data.
 	 * Positions are stored for later transform updates.
+	 * @param normals Optional vertex normals for lighting
 	 */
 	create(
 		renderer: IRenderer,
 		positions: Float32Array,
 		texCoords: Float32Array | null,
 		indices: Uint16Array | Uint32Array,
-		texture: ITexture | null
+		texture: ITexture | null,
+		normals?: Float32Array | null
 	): void {
 		this._vertexCount = positions.length / 3;
 		const indexCount = indices.length;
 		const expectedTexCoordLength = this._vertexCount * 2;
 
-		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"})`);
+		debugLog(`Mesh #${this._id}: Creating GPU buffers (${this._vertexCount} verts, ${indexCount} indices, texture: ${texture ? "yes" : "no"}, normals: ${normals ? "yes" : "no"})`);
 		debugLog(`Mesh #${this._id}: positions.length=${positions.length}, texCoords.length=${texCoords?.length}, expected texCoords=${expectedTexCoordLength}`);
 
 		// Store original positions for sync transform fallback
 		this._originalPositions = new Float32Array(positions);
+
+		// Store normals if provided
+		if (normals && normals.length === positions.length) {
+			this._originalNormals = new Float32Array(normals);
+			this._transformedNormals = new Float32Array(normals.length);
+			this._transformedNormals.set(normals);
+			this._hasNormals = true;
+		} else if (!normals) {
+			// Compute normals from triangle faces if not provided
+			this._originalNormals = this._computeNormals(positions, indices);
+			if (this._originalNormals) {
+				this._transformedNormals = new Float32Array(this._originalNormals.length);
+				this._transformedNormals.set(this._originalNormals);
+				this._hasNormals = true;
+			}
+		}
 
 		this._meshData = renderer.createMeshData(this._vertexCount, indexCount);
 
@@ -145,6 +183,62 @@ export class GltfMesh {
 	}
 
 	/**
+	 * Compute vertex normals from triangle faces.
+	 * Uses area-weighted averaging of face normals.
+	 */
+	private _computeNormals(positions: Float32Array, indices: Uint16Array | Uint32Array): Float32Array | null {
+		const vertexCount = positions.length / 3;
+		const normals = new Float32Array(positions.length);
+		normals.fill(0);
+
+		// Accumulate face normals at each vertex
+		for (let i = 0; i < indices.length; i += 3) {
+			const i0 = indices[i];
+			const i1 = indices[i + 1];
+			const i2 = indices[i + 2];
+
+			// Get triangle vertices
+			const p0x = positions[i0 * 3], p0y = positions[i0 * 3 + 1], p0z = positions[i0 * 3 + 2];
+			const p1x = positions[i1 * 3], p1y = positions[i1 * 3 + 1], p1z = positions[i1 * 3 + 2];
+			const p2x = positions[i2 * 3], p2y = positions[i2 * 3 + 1], p2z = positions[i2 * 3 + 2];
+
+			// Edge vectors
+			const e1x = p1x - p0x, e1y = p1y - p0y, e1z = p1z - p0z;
+			const e2x = p2x - p0x, e2y = p2y - p0y, e2z = p2z - p0z;
+
+			// Cross product (unnormalized - magnitude is proportional to area)
+			const nx = e1y * e2z - e1z * e2y;
+			const ny = e1z * e2x - e1x * e2z;
+			const nz = e1x * e2y - e1y * e2x;
+
+			// Add to all three vertices
+			normals[i0 * 3] += nx; normals[i0 * 3 + 1] += ny; normals[i0 * 3 + 2] += nz;
+			normals[i1 * 3] += nx; normals[i1 * 3 + 1] += ny; normals[i1 * 3 + 2] += nz;
+			normals[i2 * 3] += nx; normals[i2 * 3 + 1] += ny; normals[i2 * 3 + 2] += nz;
+		}
+
+		// Normalize all normals
+		for (let i = 0; i < vertexCount; i++) {
+			const offset = i * 3;
+			const nx = normals[offset], ny = normals[offset + 1], nz = normals[offset + 2];
+			const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+			if (len > 0.0001) {
+				normals[offset] = nx / len;
+				normals[offset + 1] = ny / len;
+				normals[offset + 2] = nz / len;
+			} else {
+				// Default to up if degenerate
+				normals[offset] = 0;
+				normals[offset + 1] = 1;
+				normals[offset + 2] = 0;
+			}
+		}
+
+		debugLog(`Mesh #${this._id}: Computed ${vertexCount} normals from triangles`);
+		return normals;
+	}
+
+	/**
 	 * Register this mesh with a worker pool for async transforms.
 	 * Call after create(). Transfers a copy of positions to the worker.
 	 */
@@ -165,7 +259,7 @@ export class GltfMesh {
 
 	/**
 	 * Register this skinned mesh with a worker pool for async CPU skinning.
-	 * Call after create() and setSkinningData(). Transfers positions, joints, weights to worker.
+	 * Call after create() and setSkinningData(). Transfers positions, normals, joints, weights to worker.
 	 */
 	registerSkinnedWithPool(pool: TransformWorkerPool): void {
 		if (this._isRegisteredSkinnedWithPool) return;
@@ -178,17 +272,24 @@ export class GltfMesh {
 
 		// Transfer copies to the worker (original stays for sync fallback)
 		const positionsCopy = new Float32Array(this._originalPositions);
+		const normalsCopy = this._originalNormals ? new Float32Array(this._originalNormals) : null;
 		const jointsCopy = this._skinningData.joints instanceof Uint16Array
 			? new Uint16Array(this._skinningData.joints)
 			: new Uint8Array(this._skinningData.joints);
 		const weightsCopy = new Float32Array(this._skinningData.weights);
 
-		pool.registerSkinnedMesh(this._id, positionsCopy, jointsCopy, weightsCopy, (skinnedPositions) => {
+		pool.registerSkinnedMesh(this._id, positionsCopy, normalsCopy, jointsCopy, weightsCopy, (skinnedPositions, skinnedNormals) => {
 			this._applyPositions(skinnedPositions);
+			if (skinnedNormals) {
+				this._applyNormals(skinnedNormals);
+				debugLog(`Mesh #${this._id}: Applied skinned normals (${skinnedNormals.length} floats)`);
+			} else {
+				debugLog(`Mesh #${this._id}: No skinned normals received`);
+			}
 		});
 
 		this._isRegisteredSkinnedWithPool = true;
-		debugLog(`Mesh #${this._id}: Registered skinned mesh with worker pool`);
+		debugLog(`Mesh #${this._id}: Registered skinned mesh with worker pool (normals: ${normalsCopy ? 'yes' : 'no'})`);
 	}
 
 	/**
@@ -214,6 +315,15 @@ export class GltfMesh {
 		this._meshData.positions.set(positions);
 		this._meshData.markDataChanged("positions", 0, this._vertexCount);
 		// debugLog(`Mesh #${this._id}: markDataChanged("positions") - worker transform`);
+	}
+
+	/**
+	 * Apply transformed normals received from worker and invalidate lighting.
+	 */
+	private _applyNormals(normals: Float32Array): void {
+		if (!this._transformedNormals || !this._hasNormals) return;
+		this._transformedNormals.set(normals);
+		this.invalidateLighting();
 	}
 
 	/**
@@ -299,6 +409,107 @@ export class GltfMesh {
 		this._lastMatrix = null;
 	}
 
+	/**
+	 * Update transformed normals from skinned normal data.
+	 * @param normals Skinned vertex normals (Float32Array, 3 floats per vertex)
+	 */
+	updateSkinnedNormals(normals: Float32Array): void {
+		if (!this._transformedNormals || !this._hasNormals) return;
+
+		if (normals.length !== this._vertexCount * 3) {
+			console.warn(`${LOG_PREFIX} Mesh #${this._id}: Normal array length mismatch`);
+			return;
+		}
+
+		this._transformedNormals.set(normals);
+	}
+
+	/**
+	 * Transform normals by a matrix (upper-left 3x3 only, for rotations).
+	 * Used for non-skinned meshes when the model matrix changes.
+	 * @param matrix The 4x4 model matrix
+	 */
+	transformNormals(matrix: Float32Array): void {
+		if (!this._originalNormals || !this._transformedNormals) return;
+
+		const n = this._vertexCount;
+
+		// Extract upper-left 3x3 (rotation/scale part)
+		// For proper normal transformation, we should use inverse transpose
+		// but for uniform scale, upper 3x3 is sufficient
+		const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
+		const m4 = matrix[4], m5 = matrix[5], m6 = matrix[6];
+		const m8 = matrix[8], m9 = matrix[9], m10 = matrix[10];
+
+		for (let i = 0; i < n; i++) {
+			const idx = i * 3;
+			const nx = this._originalNormals[idx];
+			const ny = this._originalNormals[idx + 1];
+			const nz = this._originalNormals[idx + 2];
+
+			// Transform normal
+			let tnx = m0 * nx + m4 * ny + m8 * nz;
+			let tny = m1 * nx + m5 * ny + m9 * nz;
+			let tnz = m2 * nx + m6 * ny + m10 * nz;
+
+			// Renormalize (in case of non-uniform scale)
+			const len = Math.sqrt(tnx * tnx + tny * tny + tnz * tnz);
+			if (len > 0.0001) {
+				tnx /= len;
+				tny /= len;
+				tnz /= len;
+			}
+
+			this._transformedNormals[idx] = tnx;
+			this._transformedNormals[idx + 1] = tny;
+			this._transformedNormals[idx + 2] = tnz;
+		}
+	}
+
+	/**
+	 * Apply vertex lighting based on transformed normals.
+	 * Updates vertex colors in the mesh data.
+	 * Skips recalculation if lighting hasn't changed (dirty tracking).
+	 *
+	 * @param modelRotation Optional model rotation matrix (4x4 mat4) to transform normals to world space
+	 * @param force If true, recalculate even if lighting version unchanged
+	 */
+	applyLighting(modelRotation?: Float32Array | null, force: boolean = false): void {
+		if (!this._meshData || !this._hasNormals || !this._transformedNormals) return;
+
+		const currentVersion = getLightingVersion();
+		if (!force && this._lastLightingVersion === currentVersion) {
+			return; // Lighting unchanged, skip
+		}
+		this._lastLightingVersion = currentVersion;
+
+		calculateMeshLighting(
+			this._transformedNormals,
+			this._meshData.colors,
+			this._vertexCount,
+			modelRotation
+		);
+
+		this._meshData.markDataChanged("colors", 0, this._vertexCount);
+	}
+
+	/**
+	 * Mark lighting as dirty so it recalculates next frame.
+	 * Call when mesh normals change (e.g., after skinning).
+	 */
+	invalidateLighting(): void {
+		this._lastLightingVersion = -1;
+	}
+
+	/**
+	 * Reset vertex colors to white (for unlit rendering).
+	 */
+	resetColors(): void {
+		if (!this._meshData) return;
+		this._meshData.fillColor(1, 1, 1, 1);
+		this._meshData.markDataChanged("colors", 0, this._vertexCount);
+	}
+
 	/** Get texture reference for debugging */
 	get texture(): ITexture | null {
 		return this._texture;
@@ -348,7 +559,11 @@ export class GltfMesh {
 		}
 		this._texture = null; // Don't delete - Model owns textures
 		this._originalPositions = null;
+		this._originalNormals = null;
+		this._transformedNormals = null;
+		this._hasNormals = false;
 		this._lastMatrix = null;
+		this._lastLightingVersion = -1;
 		this._vertexCount = 0;
 
 		// Clear skinning references (not owned, just references to cached data)

@@ -28,6 +28,8 @@ const CPU_WARNING_LOGGED = new WeakSet<AnimationController>();
 export interface AnimationMeshData {
 	/** Original bind pose positions (Float32Array, 3 floats per vertex) */
 	originalPositions: Float32Array;
+	/** Original bind pose normals (Float32Array, 3 floats per vertex, optional) */
+	originalNormals?: Float32Array | null;
 	/** Per-vertex skinning data (joint indices and weights) */
 	skinningData: MeshSkinningData;
 }
@@ -97,6 +99,8 @@ export class AnimationController {
 
 	// Pre-allocated skinned position output buffers (one per mesh)
 	private readonly _skinnedPositions: Float32Array[];
+	// Pre-allocated skinned normal output buffers (one per mesh, if mesh has normals)
+	private readonly _skinnedNormals: (Float32Array | null)[];
 
 	// Cached active channels (populated on play() to avoid lookup each frame)
 	private _activeChannels: ActiveChannel[] = [];
@@ -144,10 +148,17 @@ export class AnimationController {
 
 		// Pre-allocate skinned position output buffers
 		this._skinnedPositions = new Array(options.meshes.length);
+		this._skinnedNormals = new Array(options.meshes.length);
 		let totalVertices = 0;
 		for (let i = 0; i < options.meshes.length; i++) {
 			const vertexCount = options.meshes[i].originalPositions.length;
 			this._skinnedPositions[i] = new Float32Array(vertexCount);
+			// Also allocate normal buffers if mesh has normals
+			if (options.meshes[i].originalNormals) {
+				this._skinnedNormals[i] = new Float32Array(vertexCount);
+			} else {
+				this._skinnedNormals[i] = null;
+			}
 			totalVertices += vertexCount / 3;
 		}
 
@@ -455,6 +466,18 @@ export class AnimationController {
 			throw new Error(`Invalid mesh index: ${meshIndex}`);
 		}
 		return this._skinnedPositions[meshIndex];
+	}
+
+	/**
+	 * Get the skinned vertex normals for a mesh.
+	 * @param meshIndex Index of the mesh
+	 * @returns Skinned normals (Float32Array, 3 floats per vertex) or null if no normals
+	 */
+	getSkinnedNormals(meshIndex: number): Float32Array | null {
+		if (meshIndex < 0 || meshIndex >= this._skinnedNormals.length) {
+			throw new Error(`Invalid mesh index: ${meshIndex}`);
+		}
+		return this._skinnedNormals[meshIndex];
 	}
 
 	/**
@@ -797,16 +820,20 @@ export class AnimationController {
 	/**
 	 * Apply CPU skinning to a single mesh.
 	 * Transforms each vertex by weighted blend of up to 4 bone matrices.
+	 * Also transforms normals if available.
 	 */
 	private _applySkinning(meshIndex: number): void {
 		const meshData = this._meshes[meshIndex];
 		const positions = meshData.originalPositions;
+		const normals = meshData.originalNormals;
 		const skinning = meshData.skinningData;
 		const output = this._skinnedPositions[meshIndex];
+		const normalOutput = this._skinnedNormals[meshIndex];
 
 		const vertexCount = positions.length / 3;
 		const joints = skinning.joints;
 		const weights = skinning.weights;
+		const hasNormals = normals && normalOutput;
 
 		for (let v = 0; v < vertexCount; v++) {
 			const posOffset = v * 3;
@@ -817,8 +844,17 @@ export class AnimationController {
 			const py = positions[posOffset + 1];
 			const pz = positions[posOffset + 2];
 
+			// Read original normal if available
+			let nx = 0, ny = 0, nz = 0;
+			if (hasNormals) {
+				nx = normals[posOffset];
+				ny = normals[posOffset + 1];
+				nz = normals[posOffset + 2];
+			}
+
 			// Accumulate weighted transforms
 			let rx = 0, ry = 0, rz = 0;
+			let rnx = 0, rny = 0, rnz = 0;
 
 			for (let j = 0; j < 4; j++) {
 				const weight = weights[skinOffset + j];
@@ -844,12 +880,37 @@ export class AnimationController {
 				rx += tx * weight;
 				ry += ty * weight;
 				rz += tz * weight;
+
+				// Transform normal by upper-left 3x3 of bone matrix (no translation)
+				if (hasNormals) {
+					const tnx = m[boneOffset + 0] * nx + m[boneOffset + 4] * ny + m[boneOffset + 8] * nz;
+					const tny = m[boneOffset + 1] * nx + m[boneOffset + 5] * ny + m[boneOffset + 9] * nz;
+					const tnz = m[boneOffset + 2] * nx + m[boneOffset + 6] * ny + m[boneOffset + 10] * nz;
+
+					rnx += tnx * weight;
+					rny += tny * weight;
+					rnz += tnz * weight;
+				}
 			}
 
 			// Write skinned position
 			output[posOffset] = rx;
 			output[posOffset + 1] = ry;
 			output[posOffset + 2] = rz;
+
+			// Write skinned normal (normalized)
+			if (hasNormals && normalOutput) {
+				const len = Math.sqrt(rnx * rnx + rny * rny + rnz * rnz);
+				if (len > 0.0001) {
+					normalOutput[posOffset] = rnx / len;
+					normalOutput[posOffset + 1] = rny / len;
+					normalOutput[posOffset + 2] = rnz / len;
+				} else {
+					normalOutput[posOffset] = 0;
+					normalOutput[posOffset + 1] = 1;
+					normalOutput[posOffset + 2] = 0;
+				}
+			}
 		}
 	}
 }

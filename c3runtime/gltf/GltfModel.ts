@@ -405,19 +405,24 @@ export class GltfModel {
 	 * Register all skinned meshes with the worker pool for worker-based skinning.
 	 */
 	private _registerSkinnedMeshesWithPool(): void {
-		if (!this._workerPool) return;
+		if (!this._workerPool) {
+			debugLog(`_registerSkinnedMeshesWithPool: No worker pool`);
+			return;
+		}
 
 		let skinnedCount = 0;
+		let registeredCount = 0;
 		for (const mesh of this._meshes) {
 			if (mesh.isSkinned) {
-				mesh.registerSkinnedWithPool(this._workerPool);
 				skinnedCount++;
+				mesh.registerSkinnedWithPool(this._workerPool);
+				if (mesh.isRegisteredSkinnedWithPool) {
+					registeredCount++;
+				}
 			}
 		}
 
-		if (skinnedCount > 0) {
-			debugLog(`Registered ${skinnedCount} skinned meshes for worker skinning`);
-		}
+		debugLog(`_registerSkinnedMeshesWithPool: ${skinnedCount} skinned, ${registeredCount} registered with pool`);
 	}
 
 	/**
@@ -449,12 +454,29 @@ export class GltfModel {
 	 * Check if worker skinning is available for this model.
 	 */
 	get hasWorkerSkinning(): boolean {
-		if (!this._workerPool || !this._useWorkers) return false;
+		if (!this._workerPool) {
+			debugLog(`hasWorkerSkinning: false (no worker pool)`);
+			return false;
+		}
+		if (!this._useWorkers) {
+			debugLog(`hasWorkerSkinning: false (workers disabled)`);
+			return false;
+		}
+		let skinnedCount = 0;
+		let registeredCount = 0;
 		for (const mesh of this._meshes) {
-			if (mesh.isSkinned && mesh.isRegisteredSkinnedWithPool) {
-				return true;
+			if (mesh.isSkinned) {
+				skinnedCount++;
+				if (mesh.isRegisteredSkinnedWithPool) {
+					registeredCount++;
+				}
 			}
 		}
+		if (registeredCount > 0) {
+			debugLog(`hasWorkerSkinning: true (${registeredCount}/${skinnedCount} registered)`);
+			return true;
+		}
+		debugLog(`hasWorkerSkinning: false (${skinnedCount} skinned, ${registeredCount} registered)`);
 		return false;
 	}
 
@@ -653,6 +675,7 @@ export class GltfModel {
 		// Extract raw data
 		const posAccessor = primitive.getAttribute("POSITION");
 		const uvAccessor = primitive.getAttribute("TEXCOORD_0");
+		const normalAccessor = primitive.getAttribute("NORMAL");
 		const indicesAccessor = primitive.getIndices();
 
 		if (!posAccessor || !indicesAccessor) {
@@ -674,6 +697,13 @@ export class GltfModel {
 			positions = posArray;
 		} else {
 			positions = new Float32Array(posArray);
+		}
+
+		// Get normals if available
+		const normalArray = normalAccessor?.getArray();
+		let normals: Float32Array | null = null;
+		if (normalArray) {
+			normals = new Float32Array(normalArray);
 		}
 
 		// Get UVs if available
@@ -711,15 +741,22 @@ export class GltfModel {
 		this._totalVertices += vertexCount;
 		this._totalIndices += indexCount;
 
-		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}, skinned: ${skinIndex !== undefined}`);
+		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}, normals: ${normals ? "yes" : "computed"}, skinned: ${skinIndex !== undefined}`);
 
 		// Apply world transform to positions (bake transform)
 		// For skinned meshes, keep bind pose positions - skinning will apply transforms at runtime
 		if (skinIndex === undefined) {
 			positions = this._transformPositions(positions, worldMatrix);
+			// Also transform normals if present
+			if (normals) {
+				normals = this._transformNormals(normals, worldMatrix);
+			}
 		} else {
 			// Make a copy so we don't modify the original accessor data
 			positions = new Float32Array(positions);
+			if (normals) {
+				normals = new Float32Array(normals);
+			}
 			debugLog(`    Skinned mesh: keeping bind pose positions (no baking)`);
 		}
 
@@ -740,8 +777,47 @@ export class GltfModel {
 
 		// Create and return mesh
 		const mesh = new GltfMesh();
-		mesh.create(renderer, positions, texCoords, indices, texture);
+		mesh.create(renderer, positions, texCoords, indices, texture, normals);
 		return mesh;
+	}
+
+	/**
+	 * Transform normals by the upper-left 3x3 of a matrix.
+	 */
+	private _transformNormals(normals: Float32Array, matrix: mat4): Float32Array {
+		const result = new Float32Array(normals.length);
+		const n = normals.length / 3;
+
+		// Extract 3x3 rotation/scale part
+		const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
+		const m4 = matrix[4], m5 = matrix[5], m6 = matrix[6];
+		const m8 = matrix[8], m9 = matrix[9], m10 = matrix[10];
+
+		for (let i = 0; i < n; i++) {
+			const idx = i * 3;
+			const nx = normals[idx];
+			const ny = normals[idx + 1];
+			const nz = normals[idx + 2];
+
+			// Transform
+			let tnx = m0 * nx + m4 * ny + m8 * nz;
+			let tny = m1 * nx + m5 * ny + m9 * nz;
+			let tnz = m2 * nx + m6 * ny + m10 * nz;
+
+			// Normalize
+			const len = Math.sqrt(tnx * tnx + tny * tny + tnz * tnz);
+			if (len > 0.0001) {
+				result[idx] = tnx / len;
+				result[idx + 1] = tny / len;
+				result[idx + 2] = tnz / len;
+			} else {
+				result[idx] = 0;
+				result[idx + 1] = 1;
+				result[idx + 2] = 0;
+			}
+		}
+
+		return result;
 	}
 
 	/**
