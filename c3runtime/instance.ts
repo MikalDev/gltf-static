@@ -236,14 +236,19 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	}
 
 	/**
-	 * Build rotation-only matrix from instance rotations (for lighting normal transform).
-	 * Includes angle (C3 rotation) + rotationX/Y/Z + scale.
+	 * Build full model matrix for lighting calculations.
+	 * Includes world position, rotation, scale, and local center offset.
+	 * This transforms vertices from model-space to world-space.
 	 */
 	_buildModelRotationMatrix(): Float32Array
 	{
 		mat4.identity(modelRotationMatrix);
 
-		// Apply rotations in same order as _buildModelViewMatrix
+		// 1. T(position): translate to instance world position
+		vec3.set(tempVec, this.x, this.y, this.totalZElevation);
+		mat4.translate(modelRotationMatrix, modelRotationMatrix, tempVec);
+
+		// 2. R: apply rotations in same order as _buildModelViewMatrix
 		if (this.angle !== 0)
 		{
 			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this.angle);
@@ -261,9 +266,17 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this._rotationZ * DEG_TO_RAD);
 		}
 
-		// Include scale (lighting calculation will renormalize)
+		// 3. S: scale (lighting calculation will renormalize normals)
 		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
 		mat4.scale(modelRotationMatrix, modelRotationMatrix, tempVec);
+
+		// 4. T(-localCenter): shift model so its center is at origin
+		if (this._model)
+		{
+			const lc = this._model.localCenter;
+			vec3.set(tempVec, -lc[0], -lc[1], -lc[2]);
+			mat4.translate(modelRotationMatrix, modelRotationMatrix, tempVec);
+		}
 
 		return modelRotationMatrix as Float32Array;
 	}
@@ -271,6 +284,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	/**
 	 * Apply lighting to all meshes. Uses dirty tracking internally.
 	 * Uses worker-based lighting for static meshes when available.
+	 * Skinned meshes get lighting via worker in _updateSkinnedMeshes - never use fallback.
 	 */
 	_applyLightingToAllMeshes(): void
 	{
@@ -290,11 +304,12 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			return;
 		}
 
-		// Fallback: main thread lighting for all meshes
+		// Fallback: main thread lighting for static meshes only
+		// Skinned meshes always use worker lighting via _updateSkinnedMeshes
 		const rotMatrix = this._buildModelRotationMatrix();
 		for (const mesh of meshes)
 		{
-			if (mesh.hasNormals)
+			if (mesh.hasNormals && !mesh.isSkinned)
 			{
 				mesh.applyLighting(rotMatrix);
 			}
@@ -303,21 +318,41 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 	/**
 	 * Build lighting configuration for worker-based lighting calculation.
+	 * Creates copies of all arrays to avoid race conditions with shared buffers.
 	 */
-	_buildLightConfig(): { ambient: Float32Array; lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array }>; modelRotation: Float32Array } | undefined
+	_buildLightConfig(): {
+		ambient: Float32Array;
+		lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array }>;
+		spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number }>;
+		modelMatrix: Float32Array;
+	} | undefined
 	{
 		const lights = Lighting.getAllLights();
-		if (lights.length === 0) return undefined;
+		const spotLights = Lighting.getAllSpotLights();
+		if (lights.length === 0 && spotLights.length === 0) return undefined;
 
+		// Copy all arrays to avoid race conditions - these are sent to workers
+		// after flush(), but the source buffers could change between now and then
 		return {
-			ambient: Lighting.getAmbientLight(),
+			ambient: new Float32Array(Lighting.getAmbientLight()),
 			lights: lights.map(l => ({
 				enabled: l.enabled,
-				color: l.color,
+				color: new Float32Array(l.color),
 				intensity: l.intensity,
-				direction: l.direction
+				direction: new Float32Array(l.direction)
 			})),
-			modelRotation: this._buildModelRotationMatrix()
+			spotLights: spotLights.map(l => ({
+				enabled: l.enabled,
+				color: new Float32Array(l.color),
+				intensity: l.intensity,
+				position: new Float32Array(l.position),
+				direction: new Float32Array(l.direction),
+				innerConeAngle: l.innerConeAngle,
+				outerConeAngle: l.outerConeAngle,
+				falloffExponent: l.falloffExponent,
+				range: l.range
+			})),
+			modelMatrix: new Float32Array(this._buildModelRotationMatrix())
 		};
 	}
 
@@ -910,6 +945,123 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_hasEnabledLights(): boolean
 	{
 		return Lighting.hasEnabledLights();
+	}
+
+	// ========================================================================
+	// Spotlight Control Methods
+	// ========================================================================
+
+	/**
+	 * Create a spotlight.
+	 * @param posX Position X
+	 * @param posY Position Y
+	 * @param posZ Position Z
+	 * @param dirX Direction X (cone axis)
+	 * @param dirY Direction Y
+	 * @param dirZ Direction Z
+	 * @param innerAngle Inner cone angle in degrees
+	 * @param outerAngle Outer cone angle in degrees
+	 * @returns Light ID
+	 */
+	_createSpotLight(posX: number, posY: number, posZ: number, dirX: number, dirY: number, dirZ: number, innerAngle: number, outerAngle: number): number
+	{
+		return Lighting.createSpotLight(posX, posY, posZ, dirX, dirY, dirZ, innerAngle, outerAngle);
+	}
+
+	/**
+	 * Set spotlight position.
+	 */
+	_setSpotLightPosition(id: number, x: number, y: number, z: number): void
+	{
+		Lighting.setSpotLightPosition(id, x, y, z);
+	}
+
+	/**
+	 * Set spotlight direction (cone axis).
+	 */
+	_setSpotLightDirection(id: number, x: number, y: number, z: number): void
+	{
+		Lighting.setSpotLightDirection(id, x, y, z);
+	}
+
+	/**
+	 * Set spotlight cone angles (in degrees).
+	 */
+	_setSpotLightConeAngles(id: number, innerAngle: number, outerAngle: number): void
+	{
+		Lighting.setSpotLightConeAngles(id, innerAngle, outerAngle);
+	}
+
+	/**
+	 * Set spotlight edge falloff exponent.
+	 */
+	_setSpotLightFalloff(id: number, exponent: number): void
+	{
+		Lighting.setSpotLightFalloff(id, exponent);
+	}
+
+	/**
+	 * Set spotlight range (0 = infinite).
+	 */
+	_setSpotLightRange(id: number, range: number): void
+	{
+		Lighting.setSpotLightRange(id, range);
+	}
+
+	/**
+	 * Enable or disable a spotlight.
+	 */
+	_setSpotLightEnabled(id: number, enabled: boolean): void
+	{
+		Lighting.setSpotLightEnabled(id, enabled);
+	}
+
+	/**
+	 * Set spotlight color (RGB 0-1).
+	 */
+	_setSpotLightColor(id: number, r: number, g: number, b: number): void
+	{
+		Lighting.setSpotLightColor(id, r, g, b);
+	}
+
+	/**
+	 * Set spotlight intensity.
+	 */
+	_setSpotLightIntensity(id: number, intensity: number): void
+	{
+		Lighting.setSpotLightIntensity(id, intensity);
+	}
+
+	/**
+	 * Remove a spotlight by ID.
+	 */
+	_removeSpotLight(id: number): boolean
+	{
+		return Lighting.removeSpotLight(id);
+	}
+
+	/**
+	 * Remove all spotlights.
+	 */
+	_removeAllSpotLights(): void
+	{
+		Lighting.removeAllSpotLights();
+	}
+
+	/**
+	 * Get number of spotlights.
+	 */
+	_getSpotLightCount(): number
+	{
+		return Lighting.getSpotLightCount();
+	}
+
+	/**
+	 * Check if any spotlights are enabled.
+	 */
+	_hasEnabledSpotLights(): boolean
+	{
+		return Lighting.hasEnabledSpotLights();
 	}
 
 	// ========================================================================

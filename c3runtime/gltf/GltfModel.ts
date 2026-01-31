@@ -78,7 +78,7 @@ export class GltfModel {
 
 	// Static lighting dirty tracking to avoid redundant worker calls
 	private _lastStaticLightingVersion: number = -1;
-	private _lastStaticLightingRotation: Float32Array | null = null;
+	private _lastStaticLightingMatrix: Float32Array | null = null;
 
 	// Bounding box center of all mesh positions (for rotation pivot)
 	private _localCenter: Float32Array = new Float32Array(3);
@@ -492,11 +492,11 @@ export class GltfModel {
 
 		// Dirty check: skip if nothing changed
 		const currentVersion = getLightingVersion();
-		const rotationChanged = this._hasRotationChanged(
-			lightConfig.modelRotation,
-			this._lastStaticLightingRotation
+		const matrixChanged = this._hasMatrixChanged(
+			lightConfig.modelMatrix,
+			this._lastStaticLightingMatrix
 		);
-		if (this._lastStaticLightingVersion === currentVersion && !rotationChanged) {
+		if (this._lastStaticLightingVersion === currentVersion && !matrixChanged) {
 			return;
 		}
 
@@ -511,8 +511,8 @@ export class GltfModel {
 
 		// Update dirty state and queue
 		this._lastStaticLightingVersion = currentVersion;
-		this._lastStaticLightingRotation = lightConfig.modelRotation
-			? new Float32Array(lightConfig.modelRotation)
+		this._lastStaticLightingMatrix = lightConfig.modelMatrix
+			? new Float32Array(lightConfig.modelMatrix)
 			: null;
 
 		this._workerPool.queueStaticLighting(meshIds, lightConfig);
@@ -520,15 +520,17 @@ export class GltfModel {
 	}
 
 	/**
-	 * Check if rotation matrix changed (compares upper-left 3x3).
+	 * Check if model matrix changed.
+	 * Compares rotation/scale (upper-left 3x3) AND translation (for spotlights).
 	 */
-	private _hasRotationChanged(
+	private _hasMatrixChanged(
 		current: Float32Array | null | undefined,
 		last: Float32Array | null
 	): boolean {
 		if (!current && !last) return false;
 		if (!current || !last) return true;
-		for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10]) {
+		// Check rotation/scale (0,1,2,4,5,6,8,9,10) and translation (12,13,14)
+		for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]) {
 			if (Math.abs(last[i] - current[i]) > 0.0001) return true;
 		}
 		return false;

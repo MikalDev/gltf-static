@@ -34,8 +34,6 @@ export class GltfMesh {
 	// Lighting dirty tracking
 	private _lastLightingVersion: number = -1;
 	private _lastRotationMatrix: Float32Array | null = null;
-	// Track if lighting was applied by worker (skip main thread recalc)
-	private _workerLightingApplied: boolean = false;
 
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
@@ -273,7 +271,6 @@ export class GltfMesh {
 			}
 			if (skinnedColors) {
 				this._applyColors(skinnedColors);
-				this._workerLightingApplied = true;
 			}
 		});
 
@@ -291,11 +288,12 @@ export class GltfMesh {
 
 		this._workerPool = pool;
 
-		// Transfer a copy of normals to the worker
+		// Transfer a copy of positions and normals to the worker
+		// Positions are needed for spotlight calculations
+		const positionsCopy = this._originalPositions ? new Float32Array(this._originalPositions) : null;
 		const normalsCopy = new Float32Array(this._originalNormals);
-		pool.registerStaticMeshForLighting(this._id, normalsCopy, (colors) => {
+		pool.registerStaticMeshForLighting(this._id, positionsCopy, normalsCopy, (colors) => {
 			this._applyColors(colors);
-			this._workerLightingApplied = true;
 		});
 
 		this._isRegisteredStaticLightingWithPool = true;
@@ -492,50 +490,48 @@ export class GltfMesh {
 	 * Apply vertex lighting based on transformed normals.
 	 * Updates vertex colors in the mesh data.
 	 * Skips recalculation if lighting hasn't changed (dirty tracking).
-	 * Skips if worker already applied lighting this frame.
 	 *
-	 * @param modelRotation Optional model rotation matrix (4x4 mat4) to transform normals to world space
+	 * @param modelMatrix Optional model matrix (4x4 mat4) to transform normals to world space
 	 * @param force If true, recalculate even if lighting version unchanged
 	 */
-	applyLighting(modelRotation?: Float32Array | null, force: boolean = false): void {
+	applyLighting(modelMatrix?: Float32Array | null, force: boolean = false): void {
 		if (!this._meshData || !this._hasNormals || !this._transformedNormals) return;
 
-		// Skip if worker already applied lighting this frame
-		if (this._workerLightingApplied) {
-			this._workerLightingApplied = false; // Reset for next frame
-			return;
-		}
-
 		const currentVersion = getLightingVersion();
-		const rotationChanged = this._hasRotationChanged(modelRotation);
+		const rotationChanged = this._hasRotationChanged(modelMatrix);
 
 		if (!force && this._lastLightingVersion === currentVersion && !rotationChanged) {
 			return; // Neither lighting nor rotation changed, skip
 		}
 		this._lastLightingVersion = currentVersion;
-		this._updateLastRotation(modelRotation);
+		this._updateLastRotation(modelMatrix);
+
+		// Pass positions for spotlight calculations
+		const positions = this._originalPositions;
 
 		calculateMeshLighting(
+			positions,
 			this._transformedNormals,
 			this._meshData.colors,
 			this._vertexCount,
-			modelRotation
+			modelMatrix
 		);
 
 		this._meshData.markDataChanged("colors", 0, this._vertexCount);
 	}
 
 	/**
-	 * Check if rotation matrix changed from last applied.
+	 * Check if model matrix changed from last applied.
+	 * Compares rotation/scale (upper-left 3x3) and translation (for spotlight calculations).
 	 */
-	private _hasRotationChanged(modelRotation?: Float32Array | null): boolean {
-		if (!modelRotation && !this._lastRotationMatrix) return false;
-		if (!modelRotation || !this._lastRotationMatrix) return true;
+	private _hasRotationChanged(modelMatrix?: Float32Array | null): boolean {
+		if (!modelMatrix && !this._lastRotationMatrix) return false;
+		if (!modelMatrix || !this._lastRotationMatrix) return true;
 
-		// Compare relevant rotation elements (upper-left 3x3 of 4x4 matrix)
-		const indices = [0, 1, 2, 4, 5, 6, 8, 9, 10];
+		// Compare rotation/scale elements (upper-left 3x3) and translation (for spotlights)
+		const indices = [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14];
 		for (const i of indices) {
-			if (Math.abs(this._lastRotationMatrix[i] - modelRotation[i]) > 0.0001) return true;
+			if (Math.abs(this._lastRotationMatrix[i] - modelMatrix[i]) > 0.0001) return true;
 		}
 		return false;
 	}
@@ -561,15 +557,6 @@ export class GltfMesh {
 	invalidateLighting(): void {
 		this._lastLightingVersion = -1;
 		this._lastRotationMatrix = null;
-	}
-
-	/**
-	 * Reset vertex colors to white (for unlit rendering).
-	 */
-	resetColors(): void {
-		if (!this._meshData) return;
-		this._meshData.fillColor(1, 1, 1, 1);
-		this._meshData.markDataChanged("colors", 0, this._vertexCount);
 	}
 
 	/** Get texture reference for debugging */
@@ -626,7 +613,6 @@ export class GltfMesh {
 		this._lastMatrix = null;
 		this._lastLightingVersion = -1;
 		this._lastRotationMatrix = null;
-		this._workerLightingApplied = false;
 		this._vertexCount = 0;
 
 		// Clear skinning references (not owned, just references to cached data)

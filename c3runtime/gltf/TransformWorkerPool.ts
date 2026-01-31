@@ -39,39 +39,42 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 	}
 }
 
-// Calculate vertex lighting from normals and light configuration
+// Calculate vertex lighting from positions, normals and light configuration
+// positions: vertex positions in model space (3 floats per vertex) - needed for spotlights
 // normals: skinned normals in model space (3 floats per vertex)
 // outColors: output RGBA colors (4 floats per vertex)
+// posOffset: offset in positions buffer (in floats, i.e., vertex * 3)
 // normalOffset: offset in normals buffer (in floats, i.e., vertex * 3)
 // colorOffset: offset in colors buffer (in floats, i.e., vertex * 4)
-// modelRotation: optional 4x4 or 3x3 matrix to transform normals to world space
-// lightConfig: { ambient: [r,g,b], lights: [{enabled, color, intensity, direction},...] }
-function calculateLighting(normals, outColors, normalOffset, colorOffset, vertexCount, modelRotation, lightConfig) {
+// modelMatrix: optional 4x4 matrix to transform positions/normals to world space
+// lightConfig: { ambient, lights, spotLights }
+function calculateLighting(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig) {
 	const ambient = lightConfig.ambient;
 	const lights = lightConfig.lights;
+	const spotLights = lightConfig.spotLights || [];
 
-	// Extract rotation matrix components if provided
-	const hasRotation = modelRotation && modelRotation.length >= 9;
+	// Extract matrix components if provided (4x4 column-major)
+	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
+
+	// Rotation/scale part (upper-left 3x3)
 	let m00 = 1, m01 = 0, m02 = 0;
 	let m10 = 0, m11 = 1, m12 = 0;
 	let m20 = 0, m21 = 0, m22 = 1;
+	// Translation part
+	let tx = 0, ty = 0, tz = 0;
 
-	if (hasRotation) {
-		if (modelRotation.length >= 16) {
-			// 4x4 matrix (column-major like gl-matrix)
-			m00 = modelRotation[0]; m01 = modelRotation[4]; m02 = modelRotation[8];
-			m10 = modelRotation[1]; m11 = modelRotation[5]; m12 = modelRotation[9];
-			m20 = modelRotation[2]; m21 = modelRotation[6]; m22 = modelRotation[10];
-		} else {
-			// 3x3 matrix (row-major)
-			m00 = modelRotation[0]; m01 = modelRotation[1]; m02 = modelRotation[2];
-			m10 = modelRotation[3]; m11 = modelRotation[4]; m12 = modelRotation[5];
-			m20 = modelRotation[6]; m21 = modelRotation[7]; m22 = modelRotation[8];
-		}
+	if (hasMatrix) {
+		m00 = modelMatrix[0]; m01 = modelMatrix[4]; m02 = modelMatrix[8];
+		m10 = modelMatrix[1]; m11 = modelMatrix[5]; m12 = modelMatrix[9];
+		m20 = modelMatrix[2]; m21 = modelMatrix[6]; m22 = modelMatrix[10];
+		tx = modelMatrix[12]; ty = modelMatrix[13]; tz = modelMatrix[14];
 	}
 
+	const hasSpotLights = spotLights.length > 0 && positions !== null;
+
 	for (let i = 0; i < vertexCount; i++) {
-		const off3 = normalOffset + i * 3;
+		const pOff3 = posOffset + i * 3;
+		const nOff3 = normalOffset + i * 3;
 		const off4 = colorOffset + i * 4;
 
 		// Start with ambient
@@ -80,16 +83,15 @@ function calculateLighting(normals, outColors, normalOffset, colorOffset, vertex
 		let b = ambient[2];
 
 		// Normal components (model space)
-		let nx = normals[off3];
-		let ny = normals[off3 + 1];
-		let nz = normals[off3 + 2];
+		let nx = normals[nOff3];
+		let ny = normals[nOff3 + 1];
+		let nz = normals[nOff3 + 2];
 
-		// Transform normal to world space if rotation provided
-		if (hasRotation) {
+		// Transform normal to world space if matrix provided
+		if (hasMatrix) {
 			const wnx = m00 * nx + m01 * ny + m02 * nz;
 			const wny = m10 * nx + m11 * ny + m12 * nz;
 			const wnz = m20 * nx + m21 * ny + m22 * nz;
-			// Renormalize in case of non-uniform scale
 			const len = Math.sqrt(wnx * wnx + wny * wny + wnz * wnz);
 			if (len > 0.0001) {
 				nx = wnx / len;
@@ -98,12 +100,11 @@ function calculateLighting(normals, outColors, normalOffset, colorOffset, vertex
 			}
 		}
 
-		// Accumulate contribution from all enabled lights
+		// Accumulate contribution from all enabled directional lights
 		for (let j = 0; j < lights.length; j++) {
 			const light = lights[j];
 			if (!light.enabled) continue;
 
-			// N dot L (both normalized, direction is TO light)
 			const NdotL = nx * light.direction[0] + ny * light.direction[1] + nz * light.direction[2];
 
 			if (NdotL > 0) {
@@ -111,6 +112,82 @@ function calculateLighting(normals, outColors, normalOffset, colorOffset, vertex
 				r += light.color[0] * contrib;
 				g += light.color[1] * contrib;
 				b += light.color[2] * contrib;
+			}
+		}
+
+		// Accumulate contribution from all enabled spotlights
+		if (hasSpotLights) {
+			// Get vertex position
+			let px = positions[pOff3];
+			let py = positions[pOff3 + 1];
+			let pz = positions[pOff3 + 2];
+
+			// Transform position to world space if matrix provided
+			if (hasMatrix) {
+				const wpx = m00 * px + m01 * py + m02 * pz + tx;
+				const wpy = m10 * px + m11 * py + m12 * pz + ty;
+				const wpz = m20 * px + m21 * py + m22 * pz + tz;
+				px = wpx;
+				py = wpy;
+				pz = wpz;
+			}
+
+			for (let j = 0; j < spotLights.length; j++) {
+				const spot = spotLights[j];
+				if (!spot.enabled) continue;
+
+				// Vector from light to vertex
+				const dx = px - spot.position[0];
+				const dy = py - spot.position[1];
+				const dz = pz - spot.position[2];
+				const distSq = dx * dx + dy * dy + dz * dz;
+				const dist = Math.sqrt(distSq);
+
+				if (dist < 0.0001) continue;
+
+				const invDist = 1 / dist;
+				const toVertX = dx * invDist;
+				const toVertY = dy * invDist;
+				const toVertZ = dz * invDist;
+
+				// Angular falloff
+				const cosAngle = spot.direction[0] * toVertX + spot.direction[1] * toVertY + spot.direction[2] * toVertZ;
+				const innerCos = Math.cos(spot.innerConeAngle);
+				const outerCos = Math.cos(spot.outerConeAngle);
+
+				if (cosAngle <= outerCos) continue;
+
+				let angularAtten;
+				if (cosAngle >= innerCos) {
+					angularAtten = 1;
+				} else {
+					const t = (cosAngle - outerCos) / (innerCos - outerCos);
+					angularAtten = Math.pow(t, spot.falloffExponent);
+				}
+
+				// Distance attenuation
+				let distAtten = 1;
+				if (spot.range > 0) {
+					if (dist >= spot.range) continue;
+					const normalizedDist = dist / spot.range;
+					const rangeAtten = 1 - normalizedDist * normalizedDist;
+					distAtten = rangeAtten * rangeAtten;
+				} else {
+					distAtten = 1 / (1 + distSq);
+				}
+
+				// N dot L
+				const lightDirX = -toVertX;
+				const lightDirY = -toVertY;
+				const lightDirZ = -toVertZ;
+				const NdotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;
+
+				if (NdotL > 0) {
+					const contrib = NdotL * spot.intensity * angularAtten * distAtten;
+					r += spot.color[0] * contrib;
+					g += spot.color[1] * contrib;
+					b += spot.color[2] * contrib;
+				}
 			}
 		}
 
@@ -318,9 +395,9 @@ self.onmessage = (e) => {
 				// Calculate lighting if config provided and mesh has normals
 				if (packedColors && packedNormals && entry.normals) {
 					calculateLighting(
-						packedNormals, packedColors,
-						offset, colorOffset, entry.vertexCount,
-						lightConfig.modelRotation, lightConfig
+						packedPositions, packedNormals, packedColors,
+						offset, offset, colorOffset, entry.vertexCount,
+						lightConfig.modelMatrix, lightConfig
 					);
 				}
 
@@ -343,9 +420,10 @@ self.onmessage = (e) => {
 		}
 
 		case "REGISTER_STATIC_LIGHTING": {
-			// Register a static mesh for lighting calculations (normals only, no skinning)
+			// Register a static mesh for lighting calculations (positions + normals)
 			const vertexCount = msg.normals.length / 3;
 			staticLightingCache.set(msg.meshId, {
+				positions: msg.positions || null,  // transferred (needed for spotlights)
 				normals: msg.normals,  // transferred
 				vertexCount
 			});
@@ -382,11 +460,11 @@ self.onmessage = (e) => {
 				const { meshId, entry } = meshEntries[i];
 
 				// Calculate lighting using existing function
-				// Normals are baked with node world transform at load time, modelRotation applies runtime rotation
+				// Normals are baked with node world transform at load time, modelMatrix applies runtime transform
 				calculateLighting(
-					entry.normals, packedColors,
-					0, colorOffset, entry.vertexCount,
-					lightConfig.modelRotation, lightConfig
+					entry.positions, entry.normals, packedColors,
+					0, 0, colorOffset, entry.vertexCount,
+					lightConfig.modelMatrix, lightConfig
 				);
 
 				meshIds[i] = meshId;
@@ -432,6 +510,20 @@ export interface WorkerLightConfig {
 		intensity: number;
 		direction: Float32Array | number[];
 	}>;
+	spotLights?: Array<{
+		enabled: boolean;
+		color: Float32Array | number[];
+		intensity: number;
+		position: Float32Array | number[];
+		direction: Float32Array | number[];
+		innerConeAngle: number;
+		outerConeAngle: number;
+		falloffExponent: number;
+		range: number;
+	}>;
+	/** Full 4x4 model matrix for position/normal transform (column-major) */
+	modelMatrix?: Float32Array | null;
+	/** @deprecated Use modelMatrix instead */
 	modelRotation?: Float32Array | null;
 }
 
@@ -602,13 +694,15 @@ export class TransformWorkerPool {
 
 	/**
 	 * Register a static mesh for worker-based lighting calculations.
-	 * Normals are transferred to worker (zero-copy).
+	 * Positions and normals are transferred to worker (zero-copy).
 	 * @param meshId Unique mesh identifier
+	 * @param positions Vertex positions in model space (will be transferred, needed for spotlights)
 	 * @param normals Vertex normals in model space (will be transferred)
 	 * @param callback Called with computed vertex colors after flush()
 	 */
 	registerStaticMeshForLighting(
 		meshId: number,
+		positions: Float32Array | null,
 		normals: Float32Array,
 		callback: StaticLightingCallback
 	): void {
@@ -620,10 +714,15 @@ export class TransformWorkerPool {
 
 		this._staticLightingRegistry.set(meshId, { workerIndex, callback });
 
-		// Transfer normals to worker
+		// Transfer positions and normals to worker
+		const transferList: ArrayBuffer[] = [normals.buffer];
+		if (positions && positions.buffer.byteLength > 0 && !transferList.includes(positions.buffer)) {
+			transferList.push(positions.buffer);
+		}
+
 		this._workers[workerIndex].postMessage(
-			{ type: "REGISTER_STATIC_LIGHTING", meshId, normals },
-			[normals.buffer]
+			{ type: "REGISTER_STATIC_LIGHTING", meshId, positions, normals },
+			transferList
 		);
 	}
 
