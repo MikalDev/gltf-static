@@ -41,6 +41,7 @@ export class GltfMesh {
 	private _workerPool: TransformWorkerPool | null = null;
 	private _isRegisteredWithPool = false;
 	private _isRegisteredSkinnedWithPool = false;
+	private _isRegisteredStaticLightingWithPool = false;
 
 	// Skinning data (reference to shared cached data, NOT owned)
 	private _skinningData: MeshSkinningData | null = null;
@@ -280,10 +281,38 @@ export class GltfMesh {
 	}
 
 	/**
+	 * Register this static mesh with a worker pool for async lighting calculations.
+	 * Only for non-skinned meshes. Call after create().
+	 */
+	registerStaticLightingWithPool(pool: TransformWorkerPool): void {
+		if (this._isRegisteredStaticLightingWithPool) return;
+		if (!this._originalNormals || !this._hasNormals) return;
+		if (this.isSkinned) return; // Skinned meshes use queueSkinning with lightConfig
+
+		this._workerPool = pool;
+
+		// Transfer a copy of normals to the worker
+		const normalsCopy = new Float32Array(this._originalNormals);
+		pool.registerStaticMeshForLighting(this._id, normalsCopy, (colors) => {
+			this._applyColors(colors);
+			this._workerLightingApplied = true;
+		});
+
+		this._isRegisteredStaticLightingWithPool = true;
+	}
+
+	/**
 	 * Check if this mesh is registered for worker skinning.
 	 */
 	get isRegisteredSkinnedWithPool(): boolean {
 		return this._isRegisteredSkinnedWithPool;
+	}
+
+	/**
+	 * Check if this mesh is registered for worker static lighting.
+	 */
+	get isRegisteredStaticLightingWithPool(): boolean {
+		return this._isRegisteredStaticLightingWithPool;
 	}
 
 	/**
@@ -576,11 +605,12 @@ export class GltfMesh {
 	 * Release GPU resources and unregister from worker pool.
 	 */
 	release(): void {
-		// Unregister from worker pool if registered (handles both regular and skinned)
-		if (this._workerPool && (this._isRegisteredWithPool || this._isRegisteredSkinnedWithPool)) {
+		// Unregister from worker pool if registered
+		if (this._workerPool && (this._isRegisteredWithPool || this._isRegisteredSkinnedWithPool || this._isRegisteredStaticLightingWithPool)) {
 			this._workerPool.unregisterMesh(this._id);
 			this._isRegisteredWithPool = false;
 			this._isRegisteredSkinnedWithPool = false;
+			this._isRegisteredStaticLightingWithPool = false;
 		}
 		this._workerPool = null;
 

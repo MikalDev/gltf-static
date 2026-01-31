@@ -2,6 +2,7 @@ import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root, Skin, Animation }
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
 import { TransformWorkerPool, SharedWorkerPool, WorkerLightConfig } from "./TransformWorkerPool.js";
+import { getVersion as getLightingVersion } from "./Lighting.js";
 import {
 	modelCache,
 	CachedModelData,
@@ -74,6 +75,10 @@ export class GltfModel {
 
 	// Matrix dirty tracking to avoid redundant transforms
 	private _lastMatrix: Float32Array | null = null;
+
+	// Static lighting dirty tracking to avoid redundant worker calls
+	private _lastStaticLightingVersion: number = -1;
+	private _lastStaticLightingRotation: Float32Array | null = null;
 
 	// Bounding box center of all mesh positions (for rotation pivot)
 	private _localCenter: Float32Array = new Float32Array(3);
@@ -393,6 +398,9 @@ export class GltfModel {
 			// Register skinned meshes with pool (for worker skinning)
 			this._registerSkinnedMeshesWithPool();
 
+			// Register static meshes with pool (for worker lighting)
+			this._registerStaticMeshesForLightingWithPool();
+
 			debugLog(`Using shared worker pool (${this._workerPool.workerCount} workers), ${this._meshes.length} meshes registered`);
 		} catch (err) {
 			debugWarn("Failed to acquire shared worker pool, falling back to sync transforms:", err);
@@ -426,6 +434,29 @@ export class GltfModel {
 	}
 
 	/**
+	 * Register all static (non-skinned) meshes with the worker pool for worker-based lighting.
+	 */
+	private _registerStaticMeshesForLightingWithPool(): void {
+		if (!this._workerPool) return;
+
+		let staticCount = 0;
+		let registeredCount = 0;
+		for (const mesh of this._meshes) {
+			if (!mesh.isSkinned && mesh.hasNormals) {
+				staticCount++;
+				mesh.registerStaticLightingWithPool(this._workerPool);
+				if (mesh.isRegisteredStaticLightingWithPool) {
+					registeredCount++;
+				}
+			}
+		}
+
+		if (registeredCount > 0) {
+			debugLog(`_registerStaticMeshesForLightingWithPool: ${staticCount} static, ${registeredCount} registered with pool`);
+		}
+	}
+
+	/**
 	 * Queue worker-based skinning for all skinned meshes using the given bone matrices.
 	 * Call this after AnimationController.update() to offload skinning to workers.
 	 * @param boneMatrices Bone matrices from AnimationController.getBoneMatrices()
@@ -449,6 +480,58 @@ export class GltfModel {
 
 		// Schedule flush for end of frame
 		SharedWorkerPool.scheduleFlush();
+	}
+
+	/**
+	 * Queue worker-based lighting for all static (non-skinned) meshes.
+	 * Skips if lighting version and rotation haven't changed (dirty tracking).
+	 * @param lightConfig Lighting configuration (ambient, lights, modelRotation)
+	 */
+	queueStaticLighting(lightConfig: WorkerLightConfig): void {
+		if (!this._workerPool || !this._useWorkers) return;
+
+		// Dirty check: skip if nothing changed
+		const currentVersion = getLightingVersion();
+		const rotationChanged = this._hasRotationChanged(
+			lightConfig.modelRotation,
+			this._lastStaticLightingRotation
+		);
+		if (this._lastStaticLightingVersion === currentVersion && !rotationChanged) {
+			return;
+		}
+
+		// Collect mesh IDs
+		const meshIds: number[] = [];
+		for (const mesh of this._meshes) {
+			if (!mesh.isSkinned && mesh.isRegisteredStaticLightingWithPool) {
+				meshIds.push(mesh.id);
+			}
+		}
+		if (meshIds.length === 0) return;
+
+		// Update dirty state and queue
+		this._lastStaticLightingVersion = currentVersion;
+		this._lastStaticLightingRotation = lightConfig.modelRotation
+			? new Float32Array(lightConfig.modelRotation)
+			: null;
+
+		this._workerPool.queueStaticLighting(meshIds, lightConfig);
+		SharedWorkerPool.scheduleFlush();
+	}
+
+	/**
+	 * Check if rotation matrix changed (compares upper-left 3x3).
+	 */
+	private _hasRotationChanged(
+		current: Float32Array | null | undefined,
+		last: Float32Array | null
+	): boolean {
+		if (!current && !last) return false;
+		if (!current || !last) return true;
+		for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10]) {
+			if (Math.abs(last[i] - current[i]) > 0.0001) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -478,6 +561,20 @@ export class GltfModel {
 			return true;
 		}
 		debugLog(`hasWorkerSkinning: false (${skinnedCount} skinned, ${registeredCount} registered)`);
+		return false;
+	}
+
+	/**
+	 * Check if worker static lighting is available for this model.
+	 */
+	get hasWorkerStaticLighting(): boolean {
+		if (!this._workerPool || !this._useWorkers) return false;
+
+		for (const mesh of this._meshes) {
+			if (!mesh.isSkinned && mesh.isRegisteredStaticLightingWithPool) {
+				return true;
+			}
+		}
 		return false;
 	}
 
@@ -515,6 +612,9 @@ export class GltfModel {
 
 				// Re-register skinned meshes for worker skinning
 				this._registerSkinnedMeshesWithPool();
+
+				// Re-register static meshes for worker lighting
+				this._registerStaticMeshesForLightingWithPool();
 
 				debugLog(`Workers enabled using shared pool (${this._workerPool.workerCount} workers)`);
 			} catch (err) {

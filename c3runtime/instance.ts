@@ -270,6 +270,7 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 	/**
 	 * Apply lighting to all meshes. Uses dirty tracking internally.
+	 * Uses worker-based lighting for static meshes when available.
 	 */
 	_applyLightingToAllMeshes(): void
 	{
@@ -277,9 +278,20 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		const meshes = this._model.meshes;
 		if (!meshes) return;
 
-		// Build rotation matrix for transforming normals to world space
-		const rotMatrix = this._buildModelRotationMatrix();
+		// Use worker-based lighting for static meshes if available
+		if (this._model.hasWorkerStaticLighting)
+		{
+			const lightConfig = this._buildLightConfig();
+			if (lightConfig)
+			{
+				this._model.queueStaticLighting(lightConfig);
+			}
+			// Skinned meshes get lighting via queueSkinning in _updateSkinnedMeshes
+			return;
+		}
 
+		// Fallback: main thread lighting for all meshes
+		const rotMatrix = this._buildModelRotationMatrix();
 		for (const mesh of meshes)
 		{
 			if (mesh.hasNormals)
