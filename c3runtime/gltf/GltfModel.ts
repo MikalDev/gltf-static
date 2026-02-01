@@ -737,6 +737,8 @@ export class GltfModel {
 				);
 
 				if (gltfMesh) {
+					// Set node name for identification
+					gltfMesh.name = nodeName;
 					loadedMeshes.push(gltfMesh);
 
 					// Extract skinning data if this node has a skin
@@ -1352,6 +1354,91 @@ export class GltfModel {
 		for (const mesh of this._meshes) {
 			lastTexture = mesh.draw(renderer, lastTexture);
 		}
+	}
+
+	// ==================== Mesh Visibility API ====================
+
+	/**
+	 * Set visibility of a mesh by name.
+	 * @param name Node name to match (case-sensitive)
+	 * @param visible Whether matching meshes should be rendered
+	 * @returns Number of meshes affected
+	 */
+	setMeshVisibleByName(name: string, visible: boolean): number {
+		let count = 0;
+		for (const mesh of this._meshes) {
+			if (mesh.name === name) {
+				mesh.visible = visible;
+				count++;
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * Get visibility of the first mesh matching a name.
+	 * @param name Node name to match
+	 * @returns Visibility state, or undefined if no mesh found
+	 */
+	getMeshVisibleByName(name: string): boolean | undefined {
+		for (const mesh of this._meshes) {
+			if (mesh.name === name) {
+				return mesh.visible;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Set visibility of a mesh by index.
+	 * @param index Mesh index (0-based)
+	 * @param visible Whether the mesh should be rendered
+	 * @returns true if mesh was found, false otherwise
+	 */
+	setMeshVisibleByIndex(index: number, visible: boolean): boolean {
+		if (index < 0 || index >= this._meshes.length) return false;
+		this._meshes[index].visible = visible;
+		return true;
+	}
+
+	/**
+	 * Get visibility of a mesh by index.
+	 * @param index Mesh index (0-based)
+	 * @returns Visibility state, or undefined if index out of range
+	 */
+	getMeshVisibleByIndex(index: number): boolean | undefined {
+		if (index < 0 || index >= this._meshes.length) return undefined;
+		return this._meshes[index].visible;
+	}
+
+	/**
+	 * Show all meshes.
+	 */
+	showAllMeshes(): void {
+		for (const mesh of this._meshes) {
+			mesh.visible = true;
+		}
+	}
+
+	/**
+	 * Hide all meshes.
+	 */
+	hideAllMeshes(): void {
+		for (const mesh of this._meshes) {
+			mesh.visible = false;
+		}
+	}
+
+	/**
+	 * Get all unique mesh names in the model.
+	 * @returns Array of unique node names
+	 */
+	getMeshNames(): string[] {
+		const names = new Set<string>();
+		for (const mesh of this._meshes) {
+			names.add(mesh.name);
+		}
+		return Array.from(names);
 	}
 
 	/**

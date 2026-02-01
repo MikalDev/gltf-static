@@ -22,6 +22,28 @@
 				"id": "is-using-workers",
 				"scriptName": "IsUsingWorkers",
 				"highlight": false
+			},
+			{
+				"id": "is-mesh-visible",
+				"scriptName": "IsMeshVisible",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "is-mesh-visible-by-index",
+				"scriptName": "IsMeshVisibleByIndex",
+				"highlight": false,
+				"params": [
+					{
+						"id": "index",
+						"type": "number"
+					}
+				]
 			}
 		],
 		"actions": [
@@ -96,6 +118,70 @@
 						"items": ["disabled", "enabled"]
 					}
 				]
+			},
+			{
+				"id": "set-mesh-visible",
+				"scriptName": "SetMeshVisible",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					},
+					{
+						"id": "visible",
+						"type": "combo",
+						"items": ["invisible", "visible"]
+					}
+				]
+			},
+			{
+				"id": "set-mesh-visible-by-index",
+				"scriptName": "SetMeshVisibleByIndex",
+				"highlight": false,
+				"params": [
+					{
+						"id": "index",
+						"type": "number"
+					},
+					{
+						"id": "visible",
+						"type": "combo",
+						"items": ["invisible", "visible"]
+					}
+				]
+			},
+			{
+				"id": "show-mesh",
+				"scriptName": "ShowMesh",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "hide-mesh",
+				"scriptName": "HideMesh",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "show-all-meshes",
+				"scriptName": "ShowAllMeshes",
+				"highlight": false
+			},
+			{
+				"id": "hide-all-meshes",
+				"scriptName": "HideAllMeshes",
+				"highlight": false
 			}
 		],
 		"expressions": [
@@ -148,6 +234,22 @@
 				"id": "mesh-count",
 				"expressionName": "MeshCount",
 				"returnType": "number"
+			},
+			{
+				"id": "mesh-names",
+				"expressionName": "MeshNames",
+				"returnType": "string"
+			},
+			{
+				"id": "mesh-name-at",
+				"expressionName": "MeshNameAt",
+				"returnType": "string",
+				"params": [
+					{
+						"id": "index",
+						"type": "number"
+					}
+				]
 			}
 		]
 	},

@@ -22,6 +22,17 @@ C3.Plugins.GltfStatic.Cnds =
 		return this._isUsingWorkers();
 	},
 
+	// Mesh visibility conditions
+	IsMeshVisible(this: SDKInstanceClass, name: string): boolean
+	{
+		return this._isMeshVisible(name);
+	},
+
+	IsMeshVisibleByIndex(this: SDKInstanceClass, index: number): boolean
+	{
+		return this._isMeshVisibleByIndex(index);
+	},
+
 	// Animation conditions
 	IsAnimationPlaying(this: SDKInstanceClass): boolean
 	{

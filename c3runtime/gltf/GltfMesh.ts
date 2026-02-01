@@ -49,6 +49,12 @@ export class GltfMesh {
 	private static _nextId: number = 0;
 	private _id: number;
 
+	// Node name from glTF (for identification)
+	private _name: string = "";
+
+	// Visibility flag (controls rendering, not processing)
+	private _visible: boolean = true;
+
 	constructor() {
 		this._id = GltfMesh._nextId++;
 	}
@@ -56,6 +62,26 @@ export class GltfMesh {
 	/** Get unique mesh ID */
 	get id(): number {
 		return this._id;
+	}
+
+	/** Get node name from glTF */
+	get name(): string {
+		return this._name;
+	}
+
+	/** Set node name */
+	set name(value: string) {
+		this._name = value;
+	}
+
+	/** Whether this mesh is visible (rendered) */
+	get visible(): boolean {
+		return this._visible;
+	}
+
+	/** Set visibility (controls rendering, not processing) */
+	set visible(value: boolean) {
+		this._visible = value;
 	}
 
 	/** Get vertex count */
@@ -572,6 +598,11 @@ export class GltfMesh {
 	 * @returns The texture used by this mesh (for tracking)
 	 */
 	draw(renderer: IRenderer, lastTexture: ITexture | null | undefined = undefined): ITexture | null {
+		// Skip render if not visible (preserves texture state tracking)
+		if (!this._visible) {
+			return lastTexture === undefined ? null : lastTexture;
+		}
+
 		if (!this._meshData) return lastTexture === undefined ? null : lastTexture;
 
 		// Only change texture/fill mode if different from last (undefined means first draw)

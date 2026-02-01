@@ -52,6 +52,16 @@ C3.Plugins.GltfStatic.Exps =
 		return this._getMeshCount();
 	},
 
+	MeshNames(this: SDKInstanceClass): string
+	{
+		return this._getMeshNames();
+	},
+
+	MeshNameAt(this: SDKInstanceClass, index: number): string
+	{
+		return this._getMeshNameAt(index);
+	},
+
 	// Animation expressions
 	AnimationTime(this: SDKInstanceClass): number
 	{

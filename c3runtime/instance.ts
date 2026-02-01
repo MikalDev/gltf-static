@@ -573,6 +573,53 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	}
 
 	// ========================================================================
+	// Mesh Visibility Methods
+	// ========================================================================
+
+	_setMeshVisible(name: string, visible: boolean): void
+	{
+		this._model?.setMeshVisibleByName(name, visible);
+	}
+
+	_showAllMeshes(): void
+	{
+		this._model?.showAllMeshes();
+	}
+
+	_hideAllMeshes(): void
+	{
+		this._model?.hideAllMeshes();
+	}
+
+	_isMeshVisible(name: string): boolean
+	{
+		return this._model?.getMeshVisibleByName(name) ?? false;
+	}
+
+	_setMeshVisibleByIndex(index: number, visible: boolean): void
+	{
+		this._model?.setMeshVisibleByIndex(index, visible);
+	}
+
+	_isMeshVisibleByIndex(index: number): boolean
+	{
+		return this._model?.getMeshVisibleByIndex(index) ?? false;
+	}
+
+	_getMeshNames(): string
+	{
+		const names = this._model?.getMeshNames() ?? [];
+		return JSON.stringify(names);
+	}
+
+	_getMeshNameAt(index: number): string
+	{
+		const meshes = this._model?.meshes;
+		if (!meshes || index < 0 || index >= meshes.length) return "";
+		return meshes[index].name;
+	}
+
+	// ========================================================================
 	// Animation Control Methods
 	// ========================================================================
 

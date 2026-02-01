@@ -89,6 +89,28 @@
 						"list-name": "On animation finished",
 						"display-text": "On {my} animation finished",
 						"description": "Triggered when a non-looping animation finishes playing."
+					},
+					"is-mesh-visible": {
+						"list-name": "Is mesh visible",
+						"display-text": "{my} mesh [b]{0}[/b] is visible",
+						"description": "True if the mesh with the given name is visible.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The mesh/node name to check."
+							}
+						}
+					},
+					"is-mesh-visible-by-index": {
+						"list-name": "Is mesh visible by index",
+						"display-text": "{my} mesh at index [b]{0}[/b] is visible",
+						"description": "True if the mesh at the given index is visible.",
+						"params": {
+							"index": {
+								"name": "Index",
+								"desc": "The mesh index (0-based)."
+							}
+						}
 					}
 				},
 				"actions": {
@@ -240,6 +262,76 @@
 								}
 							}
 						}
+					},
+					"set-mesh-visible": {
+						"list-name": "Set mesh visible",
+						"display-text": "{my} set mesh [b]{0}[/b] [b]{1}[/b]",
+						"description": "Set the visibility of a mesh by name.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The mesh/node name to set visibility for."
+							},
+							"visible": {
+								"name": "Visible",
+								"desc": "Whether the mesh should be visible.",
+								"items": {
+									"invisible": "Invisible",
+									"visible": "Visible"
+								}
+							}
+						}
+					},
+					"set-mesh-visible-by-index": {
+						"list-name": "Set mesh visible by index",
+						"display-text": "{my} set mesh at index [b]{0}[/b] [b]{1}[/b]",
+						"description": "Set the visibility of a mesh by index.",
+						"params": {
+							"index": {
+								"name": "Index",
+								"desc": "The mesh index (0-based)."
+							},
+							"visible": {
+								"name": "Visible",
+								"desc": "Whether the mesh should be visible.",
+								"items": {
+									"invisible": "Invisible",
+									"visible": "Visible"
+								}
+							}
+						}
+					},
+					"show-mesh": {
+						"list-name": "Show mesh",
+						"display-text": "{my} show mesh [b]{0}[/b]",
+						"description": "Show a mesh by name.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The mesh/node name to show."
+							}
+						}
+					},
+					"hide-mesh": {
+						"list-name": "Hide mesh",
+						"display-text": "{my} hide mesh [b]{0}[/b]",
+						"description": "Hide a mesh by name.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The mesh/node name to hide."
+							}
+						}
+					},
+					"show-all-meshes": {
+						"list-name": "Show all meshes",
+						"display-text": "{my} show all meshes",
+						"description": "Make all meshes visible."
+					},
+					"hide-all-meshes": {
+						"list-name": "Hide all meshes",
+						"display-text": "{my} hide all meshes",
+						"description": "Hide all meshes."
 					}
 				},
 				"expressions": {
@@ -282,6 +374,20 @@
 					"mesh-count": {
 						"description": "Get the number of meshes in the model.",
 						"translated-name": "MeshCount"
+					},
+					"mesh-names": {
+						"description": "Get a JSON array of all unique mesh/node names.",
+						"translated-name": "MeshNames"
+					},
+					"mesh-name-at": {
+						"description": "Get the mesh/node name at the given index.",
+						"translated-name": "MeshNameAt",
+						"params": {
+							"index": {
+								"name": "Index",
+								"desc": "The mesh index (0-based)."
+							}
+						}
 					},
 					"animation-time": {
 						"description": "Get the current animation playback time in seconds.",

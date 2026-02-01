@@ -27,6 +27,37 @@ C3.Plugins.GltfStatic.Acts =
 		this._setWorkerEnabled(enabled !== 0);
 	},
 
+	// Mesh visibility actions
+	SetMeshVisible(this: SDKInstanceClass, name: string, visible: number): void
+	{
+		this._setMeshVisible(name, visible !== 0);
+	},
+
+	SetMeshVisibleByIndex(this: SDKInstanceClass, index: number, visible: number): void
+	{
+		this._setMeshVisibleByIndex(index, visible !== 0);
+	},
+
+	ShowMesh(this: SDKInstanceClass, name: string): void
+	{
+		this._setMeshVisible(name, true);
+	},
+
+	HideMesh(this: SDKInstanceClass, name: string): void
+	{
+		this._setMeshVisible(name, false);
+	},
+
+	ShowAllMeshes(this: SDKInstanceClass): void
+	{
+		this._showAllMeshes();
+	},
+
+	HideAllMeshes(this: SDKInstanceClass): void
+	{
+		this._hideAllMeshes();
+	},
+
 	// Animation actions
 	PlayAnimation(this: SDKInstanceClass, name: string): void
 	{
