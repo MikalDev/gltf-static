@@ -22,6 +22,8 @@ export interface DirectionalLight {
 	intensity: number;
 	/** Direction TO the light source (normalized) */
 	direction: Float32Array;
+	/** Whether this light contributes specular highlights */
+	specularEnabled: boolean;
 }
 
 export interface SpotLight {
@@ -45,17 +47,41 @@ export interface SpotLight {
 	falloffExponent: number;
 	/** Maximum range (0 = infinite, no distance attenuation) */
 	range: number;
+	/** Whether this light contributes specular highlights */
+	specularEnabled: boolean;
 }
 
 // ============================================================================
 // Global Light State (accessible via globalThis)
 // ============================================================================
 
+export interface HemisphereLight {
+	/** Whether hemisphere light is enabled */
+	enabled: boolean;
+	/** Sky color RGB (0-1) - applied to upward-facing normals */
+	skyColor: Float32Array;
+	/** Ground color RGB (0-1) - applied to downward-facing normals */
+	groundColor: Float32Array;
+	/** Intensity multiplier */
+	intensity: number;
+}
+
+export interface SpecularConfig {
+	/** Specular power/exponent (higher = tighter highlight) */
+	shininess: number;
+	/** Global specular intensity multiplier */
+	intensity: number;
+	/** Debug mode: output pure blue for any specular contribution */
+	debugBlue?: boolean;
+}
+
 declare global {
 	var gltfLights: DirectionalLight[];
 	var gltfSpotLights: SpotLight[];
 	var gltfLightIdCounter: number;
 	var gltfAmbientLight: Float32Array;
+	var gltfHemisphereLight: HemisphereLight;
+	var gltfSpecular: SpecularConfig;
 	var gltfLightingVersion: number;
 }
 
@@ -66,19 +92,24 @@ if (!globalThis.gltfLights) {
 	globalThis.gltfLightIdCounter = 0;
 	globalThis.gltfAmbientLight = new Float32Array([0.2, 0.2, 0.2]);
 	globalThis.gltfLightingVersion = 0;
+}
 
-	// Create default directional light (very dim, from above and angled)
-	// Direction TO light: normalized (1, 2, -1) - light coming from upper-front-left
-	const len = Math.sqrt(1 + 4 + 1); // sqrt(6) ≈ 2.449
-	const defaultLight: DirectionalLight = {
-		id: globalThis.gltfLightIdCounter++,
-		enabled: true,
-		color: new Float32Array([0.1, 0.1, 0.1]),  // Very dark
-		intensity: 0.1,
-		direction: new Float32Array([1 / len, 2 / len, -1 / len])
+// Initialize hemisphere light separately (may not exist from older versions)
+if (!globalThis.gltfHemisphereLight) {
+	globalThis.gltfHemisphereLight = {
+		enabled: false,
+		skyColor: new Float32Array([0.8, 0.9, 1.0]),      // Light blue sky
+		groundColor: new Float32Array([0.2, 0.15, 0.1]),  // Brown ground
+		intensity: 1.0
 	};
-	globalThis.gltfLights.push(defaultLight);
-	globalThis.gltfLightingVersion++;
+}
+
+// Initialize specular config (may not exist from older versions)
+if (!globalThis.gltfSpecular) {
+	globalThis.gltfSpecular = {
+		shininess: 32.0,    // Default specular power
+		intensity: 1.0      // Default specular intensity
+	};
 }
 
 // ============================================================================
@@ -129,7 +160,8 @@ export function createDirectionalLight(dirX: number, dirY: number, dirZ: number)
 		enabled: true,
 		color: new Float32Array([1, 1, 1]),
 		intensity: 1.0,
-		direction: new Float32Array([nx, ny, nz])
+		direction: new Float32Array([nx, ny, nz]),
+		specularEnabled: true
 	};
 
 	globalThis.gltfLights.push(light);
@@ -254,6 +286,185 @@ export function getAmbientLight(): Float32Array {
 }
 
 // ============================================================================
+// Script Interface - Hemisphere Light
+// ============================================================================
+
+/**
+ * Enable or disable hemisphere lighting.
+ * Hemisphere lighting blends between sky and ground colors based on normal.y.
+ */
+export function setHemisphereLightEnabled(enabled: boolean): void {
+	if (globalThis.gltfHemisphereLight.enabled !== enabled) {
+		globalThis.gltfHemisphereLight.enabled = enabled;
+		_markDirty();
+	}
+}
+
+/**
+ * Check if hemisphere lighting is enabled.
+ */
+export function isHemisphereLightEnabled(): boolean {
+	return globalThis.gltfHemisphereLight.enabled;
+}
+
+/**
+ * Set hemisphere light sky color (RGB 0-1).
+ * Applied to upward-facing normals (normal.y = 1).
+ */
+export function setHemisphereLightSkyColor(r: number, g: number, b: number): void {
+	const h = globalThis.gltfHemisphereLight;
+	h.skyColor[0] = r;
+	h.skyColor[1] = g;
+	h.skyColor[2] = b;
+	_markDirty();
+}
+
+/**
+ * Set hemisphere light ground color (RGB 0-1).
+ * Applied to downward-facing normals (normal.y = -1).
+ */
+export function setHemisphereLightGroundColor(r: number, g: number, b: number): void {
+	const h = globalThis.gltfHemisphereLight;
+	h.groundColor[0] = r;
+	h.groundColor[1] = g;
+	h.groundColor[2] = b;
+	_markDirty();
+}
+
+/**
+ * Set hemisphere light intensity multiplier.
+ */
+export function setHemisphereLightIntensity(intensity: number): void {
+	if (globalThis.gltfHemisphereLight.intensity !== intensity) {
+		globalThis.gltfHemisphereLight.intensity = Math.max(0, intensity);
+		_markDirty();
+	}
+}
+
+/**
+ * Get the hemisphere light configuration.
+ */
+export function getHemisphereLight(): HemisphereLight {
+	// Ensure hemisphere light exists (may be missing from older versions)
+	if (!globalThis.gltfHemisphereLight) {
+		globalThis.gltfHemisphereLight = {
+			enabled: false,
+			skyColor: new Float32Array([0.8, 0.9, 1.0]),
+			groundColor: new Float32Array([0.2, 0.15, 0.1]),
+			intensity: 1.0
+		};
+	}
+	return globalThis.gltfHemisphereLight;
+}
+
+// ============================================================================
+// Script Interface - Specular Configuration
+// ============================================================================
+
+/**
+ * Enable or disable specular for a directional light.
+ */
+export function setLightSpecularEnabled(id: number, enabled: boolean): void {
+	const light = getLight(id);
+	if (light && light.specularEnabled !== enabled) {
+		light.specularEnabled = enabled;
+		_markDirty();
+	}
+}
+
+/**
+ * Check if specular is enabled for a directional light.
+ */
+export function isLightSpecularEnabled(id: number): boolean {
+	return getLight(id)?.specularEnabled ?? false;
+}
+
+/**
+ * Enable or disable specular for a spotlight.
+ */
+export function setSpotLightSpecularEnabled(id: number, enabled: boolean): void {
+	const light = getSpotLight(id);
+	if (light && light.specularEnabled !== enabled) {
+		light.specularEnabled = enabled;
+		_markDirty();
+	}
+}
+
+/**
+ * Check if specular is enabled for a spotlight.
+ */
+export function isSpotLightSpecularEnabled(id: number): boolean {
+	return getSpotLight(id)?.specularEnabled ?? false;
+}
+
+/**
+ * Set global specular shininess (power/exponent).
+ * Higher values = tighter, more focused highlights.
+ */
+export function setSpecularShininess(shininess: number): void {
+	if (globalThis.gltfSpecular.shininess !== shininess) {
+		globalThis.gltfSpecular.shininess = Math.max(1, shininess);
+		_markDirty();
+	}
+}
+
+/**
+ * Get global specular shininess.
+ */
+export function getSpecularShininess(): number {
+	return globalThis.gltfSpecular.shininess;
+}
+
+/**
+ * Set global specular intensity multiplier.
+ */
+export function setSpecularIntensity(intensity: number): void {
+	if (globalThis.gltfSpecular.intensity !== intensity) {
+		globalThis.gltfSpecular.intensity = Math.max(0, intensity);
+		_markDirty();
+	}
+}
+
+/**
+ * Get global specular intensity.
+ */
+export function getSpecularIntensity(): number {
+	return globalThis.gltfSpecular.intensity;
+}
+
+/**
+ * Enable/disable specular debug mode.
+ * When enabled, any specular contribution shows as pure blue for visibility testing.
+ */
+export function setSpecularDebugBlue(enabled: boolean): void {
+	if (globalThis.gltfSpecular.debugBlue !== enabled) {
+		globalThis.gltfSpecular.debugBlue = enabled;
+		_markDirty();
+	}
+}
+
+/**
+ * Check if specular debug mode is enabled.
+ */
+export function isSpecularDebugBlue(): boolean {
+	return globalThis.gltfSpecular.debugBlue ?? false;
+}
+
+/**
+ * Get the specular configuration.
+ */
+export function getSpecularConfig(): SpecularConfig {
+	// Ensure specular config exists (may be missing from older versions)
+	if (!globalThis.gltfSpecular) {
+		globalThis.gltfSpecular = {
+			shininess: 32.0,
+			intensity: 1.0
+		};
+	}
+	return globalThis.gltfSpecular;
+}
+
+// ============================================================================
 // Script Interface - Spotlight Management
 // ============================================================================
 
@@ -303,7 +514,8 @@ export function createSpotLight(
 		innerConeAngle: innerAngleDeg * DEG_TO_RAD,
 		outerConeAngle: outerAngleDeg * DEG_TO_RAD,
 		falloffExponent: Math.max(0.01, falloffExponent),
-		range: Math.max(0, range)
+		range: Math.max(0, range),
+		specularEnabled: true
 	};
 
 	globalThis.gltfSpotLights.push(light);
@@ -498,11 +710,13 @@ export function calculateMeshLighting(
 	normals: Float32Array,
 	outColors: Float32Array,
 	vertexCount: number,
-	modelMatrix?: Float32Array | null
+	modelMatrix?: Float32Array | null,
+	cameraPosition?: Float32Array | null
 ): void {
 	const ambient = globalThis.gltfAmbientLight;
 	const lights = globalThis.gltfLights;
 	const spotLights = globalThis.gltfSpotLights;
+	const specular = globalThis.gltfSpecular;
 
 	// Extract matrix components if provided (4x4 column-major)
 	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
@@ -524,6 +738,9 @@ export function calculateMeshLighting(
 
 	// Check if we have spotlights to process
 	const hasSpotLights = spotLights.length > 0 && positions !== null;
+
+	// Check if we can do specular (need camera position and vertex positions)
+	const canDoSpecular = cameraPosition && cameraPosition.length >= 3 && positions !== null && specular.intensity > 0;
 
 	for (let i = 0; i < vertexCount; i++) {
 		const off3 = i * 3;
@@ -553,28 +770,27 @@ export function calculateMeshLighting(
 			}
 		}
 
-		// Accumulate contribution from all enabled directional lights
-		for (let j = 0; j < lights.length; j++) {
-			const light = lights[j];
-			if (!light.enabled) continue;
-
-			// N dot L (both normalized, direction is TO light)
-			const NdotL = nx * light.direction[0] + ny * light.direction[1] + nz * light.direction[2];
-
-			if (NdotL > 0) {
-				const contrib = NdotL * light.intensity;
-				r += light.color[0] * contrib;
-				g += light.color[1] * contrib;
-				b += light.color[2] * contrib;
-			}
+		// Hemisphere light contribution (blend sky/ground based on normal.z for Z-up)
+		const hemisphere = globalThis.gltfHemisphereLight;
+		if (hemisphere.enabled) {
+			// Blend factor: normal.z from [-1, 1] maps to [0, 1]
+			const blend = (nz + 1) * 0.5;
+			const invBlend = 1 - blend;
+			const hemiIntensity = hemisphere.intensity;
+			r += (hemisphere.groundColor[0] * invBlend + hemisphere.skyColor[0] * blend) * hemiIntensity;
+			g += (hemisphere.groundColor[1] * invBlend + hemisphere.skyColor[1] * blend) * hemiIntensity;
+			b += (hemisphere.groundColor[2] * invBlend + hemisphere.skyColor[2] * blend) * hemiIntensity;
 		}
 
-		// Accumulate contribution from all enabled spotlights
-		if (hasSpotLights) {
-			// Get vertex position in model space
-			let px = positions[off3];
-			let py = positions[off3 + 1];
-			let pz = positions[off3 + 2];
+		// Get vertex world position (needed for spotlights and specular)
+		let px = 0, py = 0, pz = 0;
+		let viewX = 0, viewY = 0, viewZ = 0;
+		const needsWorldPos = hasSpotLights || canDoSpecular;
+
+		if (needsWorldPos && positions) {
+			px = positions[off3];
+			py = positions[off3 + 1];
+			pz = positions[off3 + 2];
 
 			// Transform position to world space if matrix provided
 			if (hasMatrix) {
@@ -585,6 +801,74 @@ export function calculateMeshLighting(
 				py = wpy;
 				pz = wpz;
 			}
+
+			// Calculate view direction for specular (vertex to camera)
+			if (canDoSpecular) {
+				const vx = cameraPosition![0] - px;
+				const vy = cameraPosition![1] - py;
+				const vz = cameraPosition![2] - pz;
+				const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz);
+				if (vLen > 0.0001) {
+					viewX = vx / vLen;
+					viewY = vy / vLen;
+					viewZ = vz / vLen;
+				}
+			}
+		}
+
+		// Accumulate contribution from all enabled directional lights
+		for (let j = 0; j < lights.length; j++) {
+			const light = lights[j];
+			if (!light.enabled) continue;
+
+			// Light direction (TO light, already normalized)
+			const lightDirX = light.direction[0];
+			const lightDirY = light.direction[1];
+			const lightDirZ = light.direction[2];
+
+			// N dot L (both normalized, direction is TO light)
+			const NdotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;
+
+			if (NdotL > 0) {
+				// Diffuse contribution
+				const contrib = NdotL * light.intensity;
+				r += light.color[0] * contrib;
+				g += light.color[1] * contrib;
+				b += light.color[2] * contrib;
+
+				// Specular contribution (Blinn-Phong)
+				if (canDoSpecular && light.specularEnabled) {
+					// Half vector: normalize(lightDir + viewDir)
+					const hx = lightDirX + viewX;
+					const hy = lightDirY + viewY;
+					const hz = lightDirZ + viewZ;
+					const hLen = Math.sqrt(hx * hx + hy * hy + hz * hz);
+					if (hLen > 0.0001) {
+						const halfX = hx / hLen;
+						const halfY = hy / hLen;
+						const halfZ = hz / hLen;
+
+						const NdotH = nx * halfX + ny * halfY + nz * halfZ;
+
+						// Debug mode: show blue regardless of NdotH sign (helps diagnose inversions)
+						if (specular.debugBlue) {
+							if (Math.abs(NdotH) > 0.01) {
+								b += 1.0;
+							}
+						} else if (NdotH < 0) {
+							// NdotH is inverted in this coordinate system
+							const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * light.intensity;
+							r += light.color[0] * spec;
+							g += light.color[1] * spec;
+							b += light.color[2] * spec;
+						}
+					}
+				}
+			}
+		}
+
+		// Accumulate contribution from all enabled spotlights
+		if (hasSpotLights) {
 
 			for (let j = 0; j < spotLights.length; j++) {
 				const spot = spotLights[j];
@@ -647,10 +931,40 @@ export function calculateMeshLighting(
 				const NdotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;
 
 				if (NdotL > 0) {
+					// Diffuse contribution
 					const contrib = NdotL * spot.intensity * angularAtten * distAtten;
 					r += spot.color[0] * contrib;
 					g += spot.color[1] * contrib;
 					b += spot.color[2] * contrib;
+
+					// Specular contribution (Blinn-Phong)
+					if (canDoSpecular && spot.specularEnabled) {
+						// Half vector: normalize(lightDir + viewDir)
+						const hx = lightDirX + viewX;
+						const hy = lightDirY + viewY;
+						const hz = lightDirZ + viewZ;
+						const hLen = Math.sqrt(hx * hx + hy * hy + hz * hz);
+						if (hLen > 0.0001) {
+							const halfX = hx / hLen;
+							const halfY = hy / hLen;
+							const halfZ = hz / hLen;
+
+							const NdotH = nx * halfX + ny * halfY + nz * halfZ;
+
+							// Debug mode: show blue regardless of NdotH sign
+							if (specular.debugBlue) {
+								if (Math.abs(NdotH) > 0.01) {
+									b -= 1.0;
+								}
+							} else if (NdotH < 0) {
+								// NdotH is inverted in this coordinate system
+								const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * spot.intensity * angularAtten * distAtten;
+								r += spot.color[0] * spec;
+								g += spot.color[1] * spec;
+								b += spot.color[2] * spec;
+							}
+						}
+					}
 				}
 			}
 		}
@@ -679,4 +993,56 @@ export function hasEnabledLights(): boolean {
  */
 export function getLightCount(): number {
 	return globalThis.gltfLights.length;
+}
+
+// Store last camera info for debugging
+let _debugCameraPosition: Float32Array | null = null;
+let _debugCameraDirection: Float32Array | null = null;
+
+/**
+ * Set camera position/direction for debug purposes.
+ * Called automatically by instance when building light config.
+ */
+export function setDebugCamera(position: Float32Array | null, direction?: Float32Array | null): void {
+	_debugCameraPosition = position;
+	_debugCameraDirection = direction || null;
+}
+
+/**
+ * Debug function to dump current lighting state to console.
+ * Call from console: globalThis.GltfBundle.Lighting.debugLightingState()
+ */
+export function debugLightingState(): void {
+	console.log("=== LIGHTING DEBUG STATE ===");
+	console.log("Ambient:", Array.from(globalThis.gltfAmbientLight));
+	console.log("Specular Config:", globalThis.gltfSpecular);
+	console.log("Hemisphere:", globalThis.gltfHemisphereLight);
+	console.log("Lighting Version:", globalThis.gltfLightingVersion);
+
+	console.log("\nCamera:");
+	if (_debugCameraPosition) {
+		console.log("  Position:", Array.from(_debugCameraPosition));
+	} else {
+		console.log("  Position: NOT SET (specular won't work)");
+	}
+	if (_debugCameraDirection) {
+		console.log("  Direction:", Array.from(_debugCameraDirection));
+	}
+
+	console.log("\nDirectional Lights (" + globalThis.gltfLights.length + "):");
+	globalThis.gltfLights.forEach((light, i) => {
+		console.log(`  [${i}] id=${light.id}, enabled=${light.enabled}, specularEnabled=${light.specularEnabled}`);
+		console.log(`      color=[${Array.from(light.color)}], intensity=${light.intensity}`);
+		console.log(`      direction=[${Array.from(light.direction)}]`);
+	});
+
+	console.log("\nSpotlights (" + globalThis.gltfSpotLights.length + "):");
+	globalThis.gltfSpotLights.forEach((light, i) => {
+		console.log(`  [${i}] id=${light.id}, enabled=${light.enabled}, specularEnabled=${light.specularEnabled}`);
+		console.log(`      color=[${Array.from(light.color)}], intensity=${light.intensity}`);
+		console.log(`      position=[${Array.from(light.position)}]`);
+		console.log(`      direction=[${Array.from(light.direction)}]`);
+	});
+
+	console.log("=== END DEBUG STATE ===");
 }

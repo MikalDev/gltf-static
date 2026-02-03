@@ -52,6 +52,8 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 	const ambient = lightConfig.ambient;
 	const lights = lightConfig.lights;
 	const spotLights = lightConfig.spotLights || [];
+	const specular = lightConfig.specular;
+	const cameraPosition = lightConfig.cameraPosition;
 
 	// Extract matrix components if provided (4x4 column-major)
 	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
@@ -71,6 +73,7 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 	}
 
 	const hasSpotLights = spotLights.length > 0 && positions !== null;
+	const canDoSpecular = cameraPosition && cameraPosition.length >= 3 && positions !== null && specular && specular.intensity > 0;
 
 	for (let i = 0; i < vertexCount; i++) {
 		const pOff3 = posOffset + i * 3;
@@ -100,27 +103,26 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 			}
 		}
 
-		// Accumulate contribution from all enabled directional lights
-		for (let j = 0; j < lights.length; j++) {
-			const light = lights[j];
-			if (!light.enabled) continue;
-
-			const NdotL = nx * light.direction[0] + ny * light.direction[1] + nz * light.direction[2];
-
-			if (NdotL > 0) {
-				const contrib = NdotL * light.intensity;
-				r += light.color[0] * contrib;
-				g += light.color[1] * contrib;
-				b += light.color[2] * contrib;
-			}
+		// Hemisphere light contribution (blend sky/ground based on normal.z for Z-up)
+		if (lightConfig.hemisphere && lightConfig.hemisphere.enabled) {
+			const hemi = lightConfig.hemisphere;
+			const blend = (nz + 1) * 0.5;
+			const invBlend = 1 - blend;
+			const hemiIntensity = hemi.intensity;
+			r += (hemi.groundColor[0] * invBlend + hemi.skyColor[0] * blend) * hemiIntensity;
+			g += (hemi.groundColor[1] * invBlend + hemi.skyColor[1] * blend) * hemiIntensity;
+			b += (hemi.groundColor[2] * invBlend + hemi.skyColor[2] * blend) * hemiIntensity;
 		}
 
-		// Accumulate contribution from all enabled spotlights
-		if (hasSpotLights) {
-			// Get vertex position
-			let px = positions[pOff3];
-			let py = positions[pOff3 + 1];
-			let pz = positions[pOff3 + 2];
+		// Get vertex world position (needed for spotlights and specular)
+		let px = 0, py = 0, pz = 0;
+		let viewX = 0, viewY = 0, viewZ = 0;
+		const needsWorldPos = hasSpotLights || canDoSpecular;
+
+		if (needsWorldPos && positions) {
+			px = positions[pOff3];
+			py = positions[pOff3 + 1];
+			pz = positions[pOff3 + 2];
 
 			// Transform position to world space if matrix provided
 			if (hasMatrix) {
@@ -132,6 +134,72 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 				pz = wpz;
 			}
 
+			// Calculate view direction for specular (vertex to camera)
+			if (canDoSpecular) {
+				const vx = cameraPosition[0] - px;
+				const vy = cameraPosition[1] - py;
+				const vz = cameraPosition[2] - pz;
+				const vLen = Math.sqrt(vx * vx + vy * vy + vz * vz);
+				if (vLen > 0.0001) {
+					viewX = vx / vLen;
+					viewY = vy / vLen;
+					viewZ = vz / vLen;
+				}
+			}
+		}
+
+		// Accumulate contribution from all enabled directional lights
+		for (let j = 0; j < lights.length; j++) {
+			const light = lights[j];
+			if (!light.enabled) continue;
+
+			// Light direction (TO light, already normalized)
+			const lightDirX = light.direction[0];
+			const lightDirY = light.direction[1];
+			const lightDirZ = light.direction[2];
+
+			const NdotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;
+
+			if (NdotL > 0) {
+				// Diffuse contribution
+				const contrib = NdotL * light.intensity;
+				r += light.color[0] * contrib;
+				g += light.color[1] * contrib;
+				b += light.color[2] * contrib;
+
+				// Specular contribution (Blinn-Phong)
+				if (canDoSpecular && light.specularEnabled) {
+					// Half vector: normalize(lightDir + viewDir)
+					const hx = lightDirX + viewX;
+					const hy = lightDirY + viewY;
+					const hz = lightDirZ + viewZ;
+					const hLen = Math.sqrt(hx * hx + hy * hy + hz * hz);
+					if (hLen > 0.0001) {
+						const halfX = hx / hLen;
+						const halfY = hy / hLen;
+						const halfZ = hz / hLen;
+
+						const NdotH = nx * halfX + ny * halfY + nz * halfZ;
+
+						// Debug mode: show color regardless of NdotH sign (helps diagnose inversions)
+						if (specular.debugBlue) {
+							if (Math.abs(NdotH) > 0.01) {
+								b += 1.0;
+							}
+						} else if (NdotH < 0) {
+							// NdotH is inverted in this coordinate system
+							const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * light.intensity;
+							r += light.color[0] * spec;
+							g += light.color[1] * spec;
+							b += light.color[2] * spec;
+						}
+					}
+				}
+			}
+		}
+
+		// Accumulate contribution from all enabled spotlights
+		if (hasSpotLights) {
 			for (let j = 0; j < spotLights.length; j++) {
 				const spot = spotLights[j];
 				if (!spot.enabled) continue;
@@ -183,10 +251,40 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 				const NdotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;
 
 				if (NdotL > 0) {
+					// Diffuse contribution
 					const contrib = NdotL * spot.intensity * angularAtten * distAtten;
 					r += spot.color[0] * contrib;
 					g += spot.color[1] * contrib;
 					b += spot.color[2] * contrib;
+
+					// Specular contribution (Blinn-Phong)
+					if (canDoSpecular && spot.specularEnabled) {
+						// Half vector: normalize(lightDir + viewDir)
+						const hx = lightDirX + viewX;
+						const hy = lightDirY + viewY;
+						const hz = lightDirZ + viewZ;
+						const hLen = Math.sqrt(hx * hx + hy * hy + hz * hz);
+						if (hLen > 0.0001) {
+							const halfX = hx / hLen;
+							const halfY = hy / hLen;
+							const halfZ = hz / hLen;
+
+							const NdotH = nx * halfX + ny * halfY + nz * halfZ;
+
+							// Debug mode: show color regardless of NdotH sign
+							if (specular.debugBlue) {
+								if (Math.abs(NdotH) > 0.01) {
+									b += 1.0;
+								}
+							} else if (NdotH < 0) {
+								// NdotH is inverted in this coordinate system
+								const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * spot.intensity * angularAtten * distAtten;
+								r += spot.color[0] * spec;
+								g += spot.color[1] * spec;
+								b += spot.color[2] * spec;
+							}
+						}
+					}
 				}
 			}
 		}
@@ -509,6 +607,7 @@ export interface WorkerLightConfig {
 		color: Float32Array | number[];
 		intensity: number;
 		direction: Float32Array | number[];
+		specularEnabled: boolean;
 	}>;
 	spotLights?: Array<{
 		enabled: boolean;
@@ -520,7 +619,23 @@ export interface WorkerLightConfig {
 		outerConeAngle: number;
 		falloffExponent: number;
 		range: number;
+		specularEnabled: boolean;
 	}>;
+	/** Hemisphere light (blends sky/ground colors based on normal.y) */
+	hemisphere?: {
+		enabled: boolean;
+		skyColor: Float32Array | number[];
+		groundColor: Float32Array | number[];
+		intensity: number;
+	};
+	/** Specular configuration */
+	specular?: {
+		shininess: number;
+		intensity: number;
+		debugBlue?: boolean;
+	};
+	/** Camera world position for specular calculations */
+	cameraPosition?: Float32Array | number[];
 	/** Full 4x4 model matrix for position/normal transform (column-major) */
 	modelMatrix?: Float32Array | null;
 	/** @deprecated Use modelMatrix instead */

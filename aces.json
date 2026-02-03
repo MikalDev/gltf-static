@@ -182,6 +182,40 @@
 				"id": "hide-all-meshes",
 				"scriptName": "HideAllMeshes",
 				"highlight": false
+			},
+			{
+				"id": "set-rotation-quaternion",
+				"scriptName": "SetRotationQuaternion",
+				"highlight": false,
+				"params": [
+					{
+						"id": "json",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "set-rotation-quaternion-xyzw",
+				"scriptName": "SetRotationQuaternionXYZW",
+				"highlight": false,
+				"params": [
+					{
+						"id": "x",
+						"type": "number"
+					},
+					{
+						"id": "y",
+						"type": "number"
+					},
+					{
+						"id": "z",
+						"type": "number"
+					},
+					{
+						"id": "w",
+						"type": "number"
+					}
+				]
 			}
 		],
 		"expressions": [
@@ -250,6 +284,31 @@
 						"type": "number"
 					}
 				]
+			},
+			{
+				"id": "rotation-quaternion",
+				"expressionName": "RotationQuaternion",
+				"returnType": "string"
+			},
+			{
+				"id": "quat-x",
+				"expressionName": "QuatX",
+				"returnType": "number"
+			},
+			{
+				"id": "quat-y",
+				"expressionName": "QuatY",
+				"returnType": "number"
+			},
+			{
+				"id": "quat-z",
+				"expressionName": "QuatZ",
+				"returnType": "number"
+			},
+			{
+				"id": "quat-w",
+				"expressionName": "QuatW",
+				"returnType": "number"
 			}
 		]
 	},
@@ -402,6 +461,111 @@
 				"id": "animation-names",
 				"expressionName": "AnimationNames",
 				"returnType": "string"
+			}
+		]
+	},
+	"bones": {
+		"conditions": [
+			{
+				"id": "has-bone",
+				"scriptName": "HasBone",
+				"highlight": false,
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			}
+		],
+		"actions": [],
+		"expressions": [
+			{
+				"id": "bone-x",
+				"expressionName": "BoneX",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-y",
+				"expressionName": "BoneY",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-z",
+				"expressionName": "BoneZ",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-angle",
+				"expressionName": "BoneAngle",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-rotation-x",
+				"expressionName": "BoneRotationX",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-rotation-y",
+				"expressionName": "BoneRotationY",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-rotation-z",
+				"expressionName": "BoneRotationZ",
+				"returnType": "number",
+				"params": [
+					{
+						"id": "name",
+						"type": "string"
+					}
+				]
+			},
+			{
+				"id": "bone-names",
+				"expressionName": "BoneNames",
+				"returnType": "string"
+			},
+			{
+				"id": "bone-count",
+				"expressionName": "BoneCount",
+				"returnType": "number"
 			}
 		]
 	}

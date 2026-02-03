@@ -1,6 +1,7 @@
 import { vec3, mat4, mat3 } from "gl-matrix";
 import type { TransformWorkerPool } from "./TransformWorkerPool.js";
 import type { MeshSkinningData, CachedSkinData } from "./types.js";
+import type { GltfNode } from "./GltfNode.js";
 import { calculateMeshLighting, getVersion as getLightingVersion } from "./Lighting.js";
 
 const LOG_PREFIX = "[GltfMesh]";
@@ -34,6 +35,7 @@ export class GltfMesh {
 	// Lighting dirty tracking
 	private _lastLightingVersion: number = -1;
 	private _lastRotationMatrix: Float32Array | null = null;
+	private _lastCameraPosition: Float32Array | null = null;
 
 	// Worker pool integration
 	private _workerPool: TransformWorkerPool | null = null;
@@ -54,6 +56,9 @@ export class GltfMesh {
 
 	// Visibility flag (controls rendering, not processing)
 	private _visible: boolean = true;
+
+	// Parent node in scene graph (for transform inheritance)
+	private _parentNode: GltfNode | null = null;
 
 	constructor() {
 		this._id = GltfMesh._nextId++;
@@ -82,6 +87,16 @@ export class GltfMesh {
 	/** Set visibility (controls rendering, not processing) */
 	set visible(value: boolean) {
 		this._visible = value;
+	}
+
+	/** Get parent node in scene graph */
+	get parentNode(): GltfNode | null {
+		return this._parentNode;
+	}
+
+	/** Set parent node in scene graph */
+	set parentNode(node: GltfNode | null) {
+		this._parentNode = node;
 	}
 
 	/** Get vertex count */
@@ -155,14 +170,17 @@ export class GltfMesh {
 		// Store original positions for sync transform fallback
 		this._originalPositions = new Float32Array(positions);
 
-		// Store normals if provided
+		// Store normals if provided with correct length
 		if (normals && normals.length === positions.length) {
 			this._originalNormals = new Float32Array(normals);
 			this._transformedNormals = new Float32Array(normals.length);
 			this._transformedNormals.set(normals);
 			this._hasNormals = true;
-		} else if (!normals) {
-			// Compute normals from triangle faces if not provided
+		} else {
+			// Compute normals from triangle faces if not provided or wrong length
+			if (normals && normals.length !== positions.length) {
+				console.warn(`${LOG_PREFIX} Mesh #${this._id}: normals length mismatch, computing normals`);
+			}
 			this._originalNormals = this._computeNormals(positions, indices);
 			if (this._originalNormals) {
 				this._transformedNormals = new Float32Array(this._originalNormals.length);
@@ -305,12 +323,16 @@ export class GltfMesh {
 
 	/**
 	 * Register this static mesh with a worker pool for async lighting calculations.
-	 * Only for non-skinned meshes. Call after create().
+	 * Only for non-skinned meshes without animated ancestors. Call after create().
 	 */
 	registerStaticLightingWithPool(pool: TransformWorkerPool): void {
 		if (this._isRegisteredStaticLightingWithPool) return;
 		if (!this._originalNormals || !this._hasNormals) return;
 		if (this.isSkinned) return; // Skinned meshes use queueSkinning with lightConfig
+
+		// Don't use worker lighting for meshes with animated ancestors
+		// Their positions change each frame, but worker has cached positions
+		if (this._parentNode?.hasAnimatedAncestor()) return;
 
 		this._workerPool = pool;
 
@@ -435,6 +457,76 @@ export class GltfMesh {
 	}
 
 	/**
+	 * Update positions based on parent node's world matrix only.
+	 * Used for static meshes under animated joints.
+	 * GPU will apply ModelView (instance TRS) during draw.
+	 */
+	updateNodeTransform(): void {
+		if (!this._parentNode || !this._meshData || !this._originalPositions || this.isSkinned) return;
+
+		const nodeWorld = this._parentNode.getWorldMatrix();
+
+		// Skip if matrix hasn't changed
+		if (!this._isMatrixDirty(nodeWorld)) return;
+
+		// Store copy of matrix for dirty checking
+		if (!this._lastMatrix) {
+			this._lastMatrix = new Float32Array(16);
+		}
+		this._lastMatrix.set(nodeWorld);
+
+		const positions = this._meshData.positions;
+		const original = this._originalPositions;
+		const n = this._vertexCount;
+
+		// Pre-extract matrix elements
+		const m0 = nodeWorld[0], m1 = nodeWorld[1], m2 = nodeWorld[2];
+		const m4 = nodeWorld[4], m5 = nodeWorld[5], m6 = nodeWorld[6];
+		const m8 = nodeWorld[8], m9 = nodeWorld[9], m10 = nodeWorld[10];
+		const m12 = nodeWorld[12], m13 = nodeWorld[13], m14 = nodeWorld[14];
+
+		for (let i = 0; i < n; i++) {
+			const idx = i * 3;
+			const x = original[idx];
+			const y = original[idx + 1];
+			const z = original[idx + 2];
+
+			positions[idx] = m0 * x + m4 * y + m8 * z + m12;
+			positions[idx + 1] = m1 * x + m5 * y + m9 * z + m13;
+			positions[idx + 2] = m2 * x + m6 * y + m10 * z + m14;
+		}
+
+		this._meshData.markDataChanged("positions", 0, n);
+
+		// Also transform normals for correct lighting
+		if (this._originalNormals && this._transformedNormals) {
+			// Extract upper-left 3x3 for normal transformation
+			for (let i = 0; i < n; i++) {
+				const idx = i * 3;
+				const nx = this._originalNormals[idx];
+				const ny = this._originalNormals[idx + 1];
+				const nz = this._originalNormals[idx + 2];
+
+				let tnx = m0 * nx + m4 * ny + m8 * nz;
+				let tny = m1 * nx + m5 * ny + m9 * nz;
+				let tnz = m2 * nx + m6 * ny + m10 * nz;
+
+				// Renormalize
+				const len = Math.sqrt(tnx * tnx + tny * tny + tnz * tnz);
+				if (len > 0.0001) {
+					tnx /= len;
+					tny /= len;
+					tnz /= len;
+				}
+
+				this._transformedNormals[idx] = tnx;
+				this._transformedNormals[idx + 1] = tny;
+				this._transformedNormals[idx + 2] = tnz;
+			}
+		}
+	}
+
+	/**
 	 * Update GPU positions from skinned vertex data.
 	 * Used by AnimationController to push skinned positions to GPU.
 	 * @param positions Skinned vertex positions (Float32Array, 3 floats per vertex)
@@ -519,28 +611,36 @@ export class GltfMesh {
 	 *
 	 * @param modelMatrix Optional model matrix (4x4 mat4) to transform normals to world space
 	 * @param force If true, recalculate even if lighting version unchanged
+	 * @param cameraPosition Optional camera position for specular calculations
 	 */
-	applyLighting(modelMatrix?: Float32Array | null, force: boolean = false): void {
+	applyLighting(modelMatrix?: Float32Array | null, force: boolean = false, cameraPosition?: Float32Array | null): void {
 		if (!this._meshData || !this._hasNormals || !this._transformedNormals) return;
 
 		const currentVersion = getLightingVersion();
 		const rotationChanged = this._hasRotationChanged(modelMatrix);
+		const cameraChanged = this._hasCameraPositionChanged(cameraPosition);
+		const hasAnimatedAncestor = this._parentNode?.hasAnimatedAncestor() ?? false;
 
-		if (!force && this._lastLightingVersion === currentVersion && !rotationChanged) {
-			return; // Neither lighting nor rotation changed, skip
+		if (!force && this._lastLightingVersion === currentVersion && !rotationChanged && !cameraChanged) {
+			return; // Nothing changed, skip
 		}
 		this._lastLightingVersion = currentVersion;
 		this._updateLastRotation(modelMatrix);
+		this._updateLastCameraPosition(cameraPosition);
 
-		// Pass positions for spotlight calculations
-		const positions = this._originalPositions;
+		// For meshes with animated ancestors: use GPU positions (transformed by updateNodeTransform)
+		// For other meshes: use _originalPositions (already baked with node world transform)
+		const positions = hasAnimatedAncestor
+			? new Float32Array(this._meshData.positions)
+			: this._originalPositions;
 
 		calculateMeshLighting(
 			positions,
 			this._transformedNormals,
 			this._meshData.colors,
 			this._vertexCount,
-			modelMatrix
+			modelMatrix,
+			cameraPosition
 		);
 
 		this._meshData.markDataChanged("colors", 0, this._vertexCount);
@@ -577,12 +677,40 @@ export class GltfMesh {
 	}
 
 	/**
+	 * Check if camera position changed (for specular recalculation).
+	 */
+	private _hasCameraPositionChanged(cameraPosition?: Float32Array | null): boolean {
+		const last = this._lastCameraPosition;
+		if (!cameraPosition && !last) return false;
+		if (!cameraPosition || !last) return true;
+		for (let i = 0; i < 3; i++) {
+			if (Math.abs(last[i] - cameraPosition[i]) > 0.0001) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Store copy of camera position for dirty checking.
+	 */
+	private _updateLastCameraPosition(cameraPosition?: Float32Array | null): void {
+		if (!cameraPosition) {
+			this._lastCameraPosition = null;
+			return;
+		}
+		if (!this._lastCameraPosition) {
+			this._lastCameraPosition = new Float32Array(3);
+		}
+		this._lastCameraPosition.set(cameraPosition);
+	}
+
+	/**
 	 * Mark lighting as dirty so it recalculates next frame.
 	 * Call when mesh normals change (e.g., after skinning).
 	 */
 	invalidateLighting(): void {
 		this._lastLightingVersion = -1;
 		this._lastRotationMatrix = null;
+		this._lastCameraPosition = null;
 	}
 
 	/** Get texture reference for debugging */
@@ -644,6 +772,7 @@ export class GltfMesh {
 		this._lastMatrix = null;
 		this._lastLightingVersion = -1;
 		this._lastRotationMatrix = null;
+		this._lastCameraPosition = null;
 		this._vertexCount = 0;
 
 		// Clear skinning references (not owned, just references to cached data)

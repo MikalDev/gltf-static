@@ -1,6 +1,8 @@
 import { WebIO, Node as GltfNodeDef, Texture, Primitive, Root, Skin, Animation } from "@gltf-transform/core";
 import { mat4, quat, vec3 } from "gl-matrix";
 import { GltfMesh } from "./GltfMesh.js";
+import { GltfNode } from "./GltfNode.js";
+import type { AnimationController } from "./AnimationController.js";
 import { TransformWorkerPool, SharedWorkerPool, WorkerLightConfig } from "./TransformWorkerPool.js";
 import { getVersion as getLightingVersion } from "./Lighting.js";
 import {
@@ -79,6 +81,7 @@ export class GltfModel {
 	// Static lighting dirty tracking to avoid redundant worker calls
 	private _lastStaticLightingVersion: number = -1;
 	private _lastStaticLightingMatrix: Float32Array | null = null;
+	private _lastCameraPosition: Float32Array | null = null;
 
 	// Bounding box center of all mesh positions (for rotation pivot)
 	private _localCenter: Float32Array = new Float32Array(3);
@@ -87,6 +90,13 @@ export class GltfModel {
 	private _skins: CachedSkinData[] = [];
 	private _animations: CachedAnimationData[] = [];
 	private _meshSkinningData: Map<number, MeshSkinningData> = new Map();
+
+	// Node transforms for bone attachment queries (non-skinned models)
+	private _nodeTransforms: Map<string, Float32Array> = new Map();
+
+	// Node hierarchy (preserves parent-child relationships for transform inheritance)
+	private _rootNodes: GltfNode[] = [];
+	private _nodesByName: Map<string, GltfNode> = new Map();
 
 	get isLoaded(): boolean {
 		return this._isLoaded;
@@ -259,7 +269,6 @@ export class GltfModel {
 			debugLog("Processing nodes and meshes...");
 			const meshStart = performance.now();
 			const root = cached.document.getRoot();
-			const identityMatrix = mat4.create();
 			const sceneList = root.listScenes();
 			debugLog(`Found ${sceneList.length} scene(s)`);
 
@@ -270,23 +279,39 @@ export class GltfModel {
 				skinMap.set(skinList[i], i);
 			}
 
-			// Track mesh index across the entire traversal
+			// Build global nodeToJointIndex map (across all skins)
+			const globalNodeToJointIndex = new Map<GltfNodeDef, number>();
+			for (const skin of cached.skins) {
+				for (const joint of skin.joints) {
+					globalNodeToJointIndex.set(joint.node, joint.index);
+				}
+			}
+
+			// Track mesh and node indices across the entire traversal
 			const meshIndexCounter = { value: 0 };
+			const nodeIndexCounter = { value: 0 };
+
+			// Clear node hierarchy storage
+			this._rootNodes = [];
+			this._nodesByName.clear();
 
 			for (const scene of sceneList) {
 				const children = scene.listChildren();
 				debugLog(`Scene has ${children.length} root node(s)`);
-				for (const node of children) {
-					this._processNode(
+				for (const nodeDef of children) {
+					const rootNode = this._processNode(
 						renderer,
-						node,
+						nodeDef,
 						cached.textureMap,
-						identityMatrix,
+						null,  // No parent for root nodes
 						loadedMeshes,
 						skinMap,
 						cached.meshSkinningData,
-						meshIndexCounter
+						meshIndexCounter,
+						nodeIndexCounter,
+						globalNodeToJointIndex
 					);
+					this._rootNodes.push(rootNode);
 				}
 			}
 			debugLog(`Meshes processed in ${(performance.now() - meshStart).toFixed(0)}ms`);
@@ -496,7 +521,8 @@ export class GltfModel {
 			lightConfig.modelMatrix,
 			this._lastStaticLightingMatrix
 		);
-		if (this._lastStaticLightingVersion === currentVersion && !matrixChanged) {
+		const cameraChanged = this._hasCameraPositionChanged(lightConfig.cameraPosition);
+		if (this._lastStaticLightingVersion === currentVersion && !matrixChanged && !cameraChanged) {
 			return;
 		}
 
@@ -513,6 +539,9 @@ export class GltfModel {
 		this._lastStaticLightingVersion = currentVersion;
 		this._lastStaticLightingMatrix = lightConfig.modelMatrix
 			? new Float32Array(lightConfig.modelMatrix)
+			: null;
+		this._lastCameraPosition = lightConfig.cameraPosition
+			? new Float32Array(lightConfig.cameraPosition)
 			: null;
 
 		this._workerPool.queueStaticLighting(meshIds, lightConfig);
@@ -531,6 +560,21 @@ export class GltfModel {
 		if (!current || !last) return true;
 		// Check rotation/scale (0,1,2,4,5,6,8,9,10) and translation (12,13,14)
 		for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14]) {
+			if (Math.abs(last[i] - current[i]) > 0.0001) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Check if camera position changed (for specular recalculation).
+	 */
+	private _hasCameraPositionChanged(
+		current: Float32Array | number[] | null | undefined
+	): boolean {
+		const last = this._lastCameraPosition;
+		if (!current && !last) return false;
+		if (!current || !last) return true;
+		for (let i = 0; i < 3; i++) {
 			if (Math.abs(last[i] - current[i]) > 0.0001) return true;
 		}
 		return false;
@@ -680,30 +724,53 @@ export class GltfModel {
 	}
 
 	/**
-	 * Process a glTF node recursively, adding meshes to flat array.
-	 * @param skinMap Map from glTF Skin to skin index in cached data
-	 * @param meshSkinningData Map to populate with per-mesh skinning data
-	 * @param meshIndexCounter Counter object to track mesh indices across recursion
+	 * Process a glTF node recursively, building node tree and adding meshes to flat array.
+	 * @param parentNode Parent GltfNode (null for root nodes)
+	 * @param globalNodeToJointIndex Map from glTF node to joint index (across all skins)
+	 * @returns The created GltfNode
 	 */
 	private _processNode(
 		renderer: IRenderer,
 		nodeDef: GltfNodeDef,
 		textureMap: Map<Texture, ITexture>,
-		parentMatrix: mat4,
+		parentNode: GltfNode | null,
 		loadedMeshes: GltfMesh[],
 		skinMap: Map<Skin, number>,
 		meshSkinningData: Map<number, MeshSkinningData>,
 		meshIndexCounter: { value: number },
+		nodeIndexCounter: { value: number },
+		globalNodeToJointIndex: Map<GltfNodeDef, number>,
 		depth: number = 0
-	): void {
-		const nodeName = nodeDef.getName() || "(unnamed)";
-		const indent = "  ".repeat(depth);
-		debugLog(`${indent}Processing node: "${nodeName}"`);
+	): GltfNode {
+		// Generate node name with fallback for unnamed nodes
+		const rawName = nodeDef.getName();
+		const nodeName = rawName || `node_${nodeIndexCounter.value}`;
+		nodeIndexCounter.value++;
 
-		// Compute world matrix for this node
+		const indent = "  ".repeat(depth);
+		debugLog(`${indent}Processing node: "${nodeName}"${rawName ? "" : " (generated)"}`);
+
+		// Create node with LOCAL matrix (not world - world is computed on demand)
 		const localMatrix = this._getLocalMatrix(nodeDef);
-		const worldMatrix = mat4.create();
-		mat4.multiply(worldMatrix, parentMatrix, localMatrix);
+		const node = new GltfNode(nodeName, localMatrix);
+
+		// Link to parent
+		if (parentNode) {
+			parentNode.addChild(node);
+		}
+
+		// Store in lookup map
+		this._nodesByName.set(nodeName, node);
+
+		// Check if this node is a joint
+		const jointIndex = globalNodeToJointIndex.get(nodeDef);
+		if (jointIndex !== undefined) {
+			node.jointIndex = jointIndex;
+			debugLog(`${indent}  Node is joint (index ${jointIndex})`);
+		}
+
+		// Store node world transform for bone attachment queries (computed from hierarchy)
+		this._nodeTransforms.set(nodeName, new Float32Array(node.getWorldMatrix()));
 
 		// Check if this node has a skin
 		const skin = nodeDef.getSkin();
@@ -731,14 +798,15 @@ export class GltfModel {
 				const gltfMesh = this._createMesh(
 					renderer,
 					primitive,
-					worldMatrix,
 					textureMap,
-					skinIndex
+					skinIndex,
+					node
 				);
 
 				if (gltfMesh) {
-					// Set node name for identification
+					// Set node name and parent node for identification and transform inheritance
 					gltfMesh.name = nodeName;
+					gltfMesh.parentNode = node;
 					loadedMeshes.push(gltfMesh);
 
 					// Extract skinning data if this node has a skin
@@ -755,27 +823,35 @@ export class GltfModel {
 			}
 		}
 
-		// Recurse children with accumulated transform
+		// Recurse children
 		const children = nodeDef.listChildren();
 		if (children.length > 0) {
 			debugLog(`${indent}  ${children.length} child node(s)`);
 		}
 		for (const child of children) {
-			this._processNode(renderer, child, textureMap, worldMatrix, loadedMeshes, skinMap, meshSkinningData, meshIndexCounter, depth + 1);
+			this._processNode(
+				renderer, child, textureMap, node, loadedMeshes,
+				skinMap, meshSkinningData, meshIndexCounter, nodeIndexCounter,
+				globalNodeToJointIndex, depth + 1
+			);
 		}
+
+		return node;
 	}
 
 	/**
-	 * Create GltfMesh from primitive, applying transform to positions.
-	 * For skinned meshes, positions are NOT baked with worldMatrix (skinning applies transforms).
-	 * @param skinIndex If present, this mesh is skinned - don't bake transforms
+	 * Create GltfMesh from primitive.
+	 * For meshes with animated ancestors: keep positions in local space (runtime transforms)
+	 * For meshes without animated ancestors: bake node world matrix into positions
+	 * @param skinIndex If present, this mesh is skinned
+	 * @param parentNode The parent GltfNode for this mesh
 	 */
 	private _createMesh(
 		renderer: IRenderer,
 		primitive: Primitive,
-		worldMatrix: mat4,
 		textureMap: Map<Texture, ITexture>,
-		skinIndex?: number
+		skinIndex?: number,
+		parentNode?: GltfNode
 	): GltfMesh | null {
 		// Extract raw data
 		const posAccessor = primitive.getAttribute("POSITION");
@@ -848,21 +924,38 @@ export class GltfModel {
 
 		debugLog(`    Primitive: ${vertexCount} verts, ${triangleCount} tris, UVs: ${texCoords ? "yes" : "no"}, normals: ${normals ? "yes" : "computed"}, skinned: ${skinIndex !== undefined}`);
 
-		// Apply world transform to positions (bake transform)
-		// For skinned meshes, keep bind pose positions - skinning will apply transforms at runtime
-		if (skinIndex === undefined) {
-			positions = this._transformPositions(positions, worldMatrix);
-			// Also transform normals if present
-			if (normals) {
-				normals = this._transformNormals(normals, worldMatrix);
-			}
-		} else {
-			// Make a copy so we don't modify the original accessor data
+		// Determine if this mesh needs runtime transforms (has animated ancestor)
+		const hasAnimatedAncestor = parentNode?.hasAnimatedAncestor() ?? false;
+
+		if (skinIndex !== undefined) {
+			// Skinned mesh: keep bind pose positions (skinning applies transforms at runtime)
 			positions = new Float32Array(positions);
 			if (normals) {
 				normals = new Float32Array(normals);
 			}
-			debugLog(`    Skinned mesh: keeping bind pose positions (no baking)`);
+			debugLog(`    Skinned mesh: keeping bind pose positions`);
+		} else if (hasAnimatedAncestor) {
+			// Static mesh with animated ancestor: keep local positions (node hierarchy applies at runtime)
+			positions = new Float32Array(positions);
+			if (normals) {
+				normals = new Float32Array(normals);
+			}
+			debugLog(`    Static mesh with animated ancestor: keeping local positions`);
+		} else {
+			// Static mesh without animated ancestor: bake node world transform
+			const worldMatrix = parentNode?.getWorldMatrix();
+			if (worldMatrix) {
+				positions = this._transformPositions(new Float32Array(positions), worldMatrix as unknown as mat4);
+				if (normals) {
+					normals = this._transformNormals(new Float32Array(normals), worldMatrix as unknown as mat4);
+				}
+				debugLog(`    Static mesh: baked node world transform`);
+			} else {
+				positions = new Float32Array(positions);
+				if (normals) {
+					normals = new Float32Array(normals);
+				}
+			}
 		}
 
 		// Get texture from material
@@ -1441,6 +1534,64 @@ export class GltfModel {
 		return Array.from(names);
 	}
 
+	// ==================== Node Transform API (Bone Attachments) ====================
+
+	/**
+	 * Get the world matrix for a named node (non-skinned models).
+	 * For skinned models, use AnimationController.getJointWorldMatrix() instead.
+	 * @param name Node name
+	 * @returns World matrix (16 floats) or null if not found
+	 */
+	getNodeWorldMatrix(name: string): Float32Array | null {
+		return this._nodeTransforms.get(name) ?? null;
+	}
+
+	/**
+	 * Get all named node names in the model.
+	 * @returns Array of node names
+	 */
+	getNodeNames(): string[] {
+		return Array.from(this._nodeTransforms.keys());
+	}
+
+	/**
+	 * Check if a named node exists.
+	 * @param name Node name
+	 * @returns true if node exists
+	 */
+	hasNode(name: string): boolean {
+		return this._nodeTransforms.has(name);
+	}
+
+	/**
+	 * Sync joint nodes with animation controller's computed local transforms.
+	 * Call this after AnimationController.update() to update node hierarchy.
+	 * @param animController The animation controller with updated joint transforms
+	 */
+	updateJointNodes(animController: AnimationController): void {
+		for (const node of this._nodesByName.values()) {
+			if (node.jointIndex >= 0) {
+				const localTransform = animController.getJointLocalTransform(node.jointIndex);
+				if (localTransform) {
+					node.setLocalMatrix(localTransform);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Update static mesh positions based on their parent node's world matrix.
+	 * Call this after updateJointNodes() to update static meshes under animated joints.
+	 * Skinned meshes are skipped (handled separately via bone matrices).
+	 */
+	updateStaticMeshTransforms(): void {
+		for (const mesh of this._meshes) {
+			if (!mesh.isSkinned && mesh.parentNode) {
+				mesh.updateNodeTransform();
+			}
+		}
+	}
+
 	/**
 	 * Release all resources.
 	 * Meshes are released directly, textures are released via cache (shared).
@@ -1465,6 +1616,9 @@ export class GltfModel {
 		this._skins = [];
 		this._animations = [];
 		this._meshSkinningData = new Map();
+		this._nodeTransforms.clear();
+		this._rootNodes = [];
+		this._nodesByName.clear();
 
 		// Don't delete textures directly - release via cache
 		this._textures = [];

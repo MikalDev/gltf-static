@@ -97,5 +97,16 @@ C3.Plugins.GltfStatic.Acts =
 	SetAnimationLoop(this: SDKInstanceClass, loop: number): void
 	{
 		this._setAnimationLoop(loop !== 0);
+	},
+
+	// Quaternion rotation actions
+	SetRotationQuaternion(this: SDKInstanceClass, json: string): void
+	{
+		this._setRotationQuaternionJson(json);
+	},
+
+	SetRotationQuaternionXYZW(this: SDKInstanceClass, x: number, y: number, z: number, w: number): void
+	{
+		this._setRotationQuaternion(x, y, z, w);
 	}
 };

@@ -528,6 +528,101 @@ export class AnimationController {
 	}
 
 	// ========================================================================
+	// Joint Query API (for Bone Attachments)
+	// ========================================================================
+
+	/**
+	 * Get world matrix for a joint by index.
+	 * Returns the joint's world-space transform (NOT bone matrix).
+	 * Call after update() to get current animation pose.
+	 * @param jointIndex Joint index (0-based)
+	 * @returns Copy of the joint's world matrix (16 floats) or null if invalid index
+	 */
+	getJointWorldMatrix(jointIndex: number): Float32Array | null {
+		if (jointIndex < 0 || jointIndex >= this._skinData.joints.length) {
+			return null;
+		}
+		// Return a copy to prevent modification
+		const offset = jointIndex * 16;
+		return new Float32Array(this._jointWorldMatrices.subarray(offset, offset + 16));
+	}
+
+	/**
+	 * Get all joint world matrices.
+	 * Returns a VIEW into internal buffer - do not modify.
+	 * @returns Joint world matrices (16 floats per joint, flattened)
+	 */
+	getJointWorldMatrices(): Float32Array {
+		return this._jointWorldMatrices;
+	}
+
+	/**
+	 * Get local transform matrix for a joint by index.
+	 * Returns the joint's local-space transform (relative to parent).
+	 * Call after update() to get current animation pose.
+	 * @param jointIndex Joint index (0-based)
+	 * @returns Copy of the joint's local matrix (16 floats) or null if invalid index
+	 */
+	getJointLocalTransform(jointIndex: number): Float32Array | null {
+		if (jointIndex < 0 || jointIndex >= this._skinData.joints.length) {
+			return null;
+		}
+		const t = this._jointTransforms[jointIndex];
+		const mat = mat4.create();
+		mat4.fromRotationTranslationScale(
+			mat,
+			t.rotation as unknown as quat,
+			t.translation as unknown as vec3,
+			t.scale as unknown as vec3
+		);
+		return new Float32Array(mat as Float32Array);
+	}
+
+	/**
+	 * Find joint index by name.
+	 * @param name Joint name
+	 * @returns Joint index, or -1 if not found
+	 */
+	getJointIndexByName(name: string): number {
+		const joints = this._skinData.joints;
+		for (let i = 0; i < joints.length; i++) {
+			if (joints[i].name === name) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * Get joint name by index.
+	 * @param jointIndex Joint index (0-based)
+	 * @returns Joint name or empty string if invalid index
+	 */
+	getJointName(jointIndex: number): string {
+		if (jointIndex < 0 || jointIndex >= this._skinData.joints.length) {
+			return "";
+		}
+		return this._skinData.joints[jointIndex].name;
+	}
+
+	/**
+	 * Get all joint names.
+	 * @returns Array of joint names
+	 */
+	getJointNames(): string[] {
+		return this._skinData.joints.map(j => j.name);
+	}
+
+	/**
+	 * Check if a joint exists by name.
+	 * @param name Joint name
+	 * @returns true if joint exists
+	 */
+	hasJoint(name: string): boolean {
+		return this.getJointIndexByName(name) >= 0;
+	}
+
+	// ========================================================================
 	// Internal: Animation Evaluation
 	// ========================================================================
 

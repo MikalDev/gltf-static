@@ -52,5 +52,11 @@ C3.Plugins.GltfStatic.Cnds =
 	OnAnimationFinished(this: SDKInstanceClass): boolean
 	{
 		return true; // Trigger condition - always returns true when triggered
+	},
+
+	// Bone attachment conditions
+	HasBone(this: SDKInstanceClass, name: string): boolean
+	{
+		return this._hasBone(name);
 	}
 };

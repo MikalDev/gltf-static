@@ -41,7 +41,8 @@
 				},
 				"aceCategories": {
 					"gltf": "glTF",
-					"animation": "Animation"
+					"animation": "Animation",
+					"bones": "Bones"
 				},
 				"conditions": {
 					"is-loaded": {
@@ -109,6 +110,17 @@
 							"index": {
 								"name": "Index",
 								"desc": "The mesh index (0-based)."
+							}
+						}
+					},
+					"has-bone": {
+						"list-name": "Has bone",
+						"display-text": "{my} has bone [b]{0}[/b]",
+						"description": "True if a bone or node with the given name exists.",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name to check for."
 							}
 						}
 					}
@@ -332,6 +344,40 @@
 						"list-name": "Hide all meshes",
 						"display-text": "{my} hide all meshes",
 						"description": "Hide all meshes."
+					},
+					"set-rotation-quaternion": {
+						"list-name": "Set rotation quaternion",
+						"display-text": "{my} set rotation quaternion to [b]{0}[/b]",
+						"description": "Set rotation using a quaternion from JSON string.",
+						"params": {
+							"json": {
+								"name": "JSON",
+								"desc": "Quaternion as JSON: {\"x\":0,\"y\":0,\"z\":0,\"w\":1}"
+							}
+						}
+					},
+					"set-rotation-quaternion-xyzw": {
+						"list-name": "Set rotation quaternion XYZW",
+						"display-text": "{my} set rotation quaternion to ([b]{0}[/b], [b]{1}[/b], [b]{2}[/b], [b]{3}[/b])",
+						"description": "Set rotation using quaternion components (x, y, z, w).",
+						"params": {
+							"x": {
+								"name": "X",
+								"desc": "Quaternion X component."
+							},
+							"y": {
+								"name": "Y",
+								"desc": "Quaternion Y component."
+							},
+							"z": {
+								"name": "Z",
+								"desc": "Quaternion Z component."
+							},
+							"w": {
+								"name": "W",
+								"desc": "Quaternion W component."
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -389,6 +435,26 @@
 							}
 						}
 					},
+					"rotation-quaternion": {
+						"description": "Get the rotation quaternion as JSON: {\"x\":0,\"y\":0,\"z\":0,\"w\":1}",
+						"translated-name": "RotationQuaternion"
+					},
+					"quat-x": {
+						"description": "Get the quaternion X component.",
+						"translated-name": "QuatX"
+					},
+					"quat-y": {
+						"description": "Get the quaternion Y component.",
+						"translated-name": "QuatY"
+					},
+					"quat-z": {
+						"description": "Get the quaternion Z component.",
+						"translated-name": "QuatZ"
+					},
+					"quat-w": {
+						"description": "Get the quaternion W component.",
+						"translated-name": "QuatW"
+					},
 					"animation-time": {
 						"description": "Get the current animation playback time in seconds.",
 						"translated-name": "AnimationTime"
@@ -426,6 +492,84 @@
 					"animation-names": {
 						"description": "Get a JSON array of all animation names.",
 						"translated-name": "AnimationNames"
+					},
+					"bone-x": {
+						"description": "Get the world X position of a bone/node.",
+						"translated-name": "BoneX",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-y": {
+						"description": "Get the world Y position of a bone/node.",
+						"translated-name": "BoneY",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-z": {
+						"description": "Get the world Z position of a bone/node.",
+						"translated-name": "BoneZ",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-angle": {
+						"description": "Get the 2D angle (Z rotation) of a bone/node in degrees. Useful for aligning 2D sprites.",
+						"translated-name": "BoneAngle",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-rotation-x": {
+						"description": "Get the X rotation of a bone/node in degrees.",
+						"translated-name": "BoneRotationX",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-rotation-y": {
+						"description": "Get the Y rotation of a bone/node in degrees.",
+						"translated-name": "BoneRotationY",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-rotation-z": {
+						"description": "Get the Z rotation of a bone/node in degrees.",
+						"translated-name": "BoneRotationZ",
+						"params": {
+							"name": {
+								"name": "Name",
+								"desc": "The bone/node name."
+							}
+						}
+					},
+					"bone-names": {
+						"description": "Get a JSON array of all bone/node names.",
+						"translated-name": "BoneNames"
+					},
+					"bone-count": {
+						"description": "Get the number of bones/nodes in the model.",
+						"translated-name": "BoneCount"
 					}
 				}
 			}

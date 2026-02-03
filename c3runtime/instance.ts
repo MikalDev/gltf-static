@@ -26,7 +26,7 @@ declare global {
 globalThis.gltfDebug = false;
 
 // Access bundle from globalThis (C3 worker compatible - no ES module import)
-const { GltfModel, GltfMesh, SharedWorkerPool, AnimationController, mat4, vec3, Lighting } = globalThis.GltfBundle;
+const { GltfModel, GltfMesh, SharedWorkerPool, AnimationController, mat4, vec3, quat, Lighting } = globalThis.GltfBundle;
 
 const LOG_PREFIX = "[GltfStatic]";
 
@@ -67,6 +67,7 @@ const modelRotationMatrix = mat4.create(); // For lighting normal transformation
 
 // Degrees to radians conversion factor
 const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
 
 C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInstanceBase
 {
@@ -79,6 +80,10 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_scaleY: number = 1;
 	_scaleZ: number = 1;
 	_debug: boolean = false;
+
+	// Quaternion rotation (x, y, z, w) - used internally, initialized from euler
+	// This represents the 3D rotation (replaces rotationX/Y/Z when set directly)
+	_rotationQuat: Float32Array = new Float32Array([0, 0, 0, 1]); // Identity quaternion
 
 	// glTF model
 	_model: GltfModelType | null = null;
@@ -120,6 +125,9 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				rotationZ: this._rotationZ,
 				scale: { x: this._scaleX, y: this._scaleY, z: this._scaleZ }
 			});
+
+			// Initialize quaternion from euler angles
+			this._updateQuatFromEuler();
 
 			// Auto-load model if URL is set
 			if (this._modelUrl)
@@ -183,23 +191,16 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		vec3.set(tempVec, this.x, this.y, this.totalZElevation);
 		mat4.translate(tempMatrix, tempMatrix, tempVec);
 
-		// 2. R: apply rotations (around origin, which is now the model center)
+		// 2. R: apply C3 angle (Z rotation) first, then quaternion rotation
 		if (this.angle !== 0)
 		{
 			mat4.rotateZ(tempMatrix, tempMatrix, this.angle);
 		}
-		if (this._rotationX !== 0)
-		{
-			mat4.rotateX(tempMatrix, tempMatrix, this._rotationX * DEG_TO_RAD);
-		}
-		if (this._rotationY !== 0)
-		{
-			mat4.rotateY(tempMatrix, tempMatrix, this._rotationY * DEG_TO_RAD);
-		}
-		if (this._rotationZ !== 0)
-		{
-			mat4.rotateZ(tempMatrix, tempMatrix, this._rotationZ * DEG_TO_RAD);
-		}
+
+		// Apply quaternion rotation (replaces individual X/Y/Z euler rotations)
+		const rotMat = mat4.create();
+		mat4.fromQuat(rotMat, this._rotationQuat);
+		mat4.multiply(tempMatrix, tempMatrix, rotMat);
 
 		// 3. S: scale
 		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
@@ -226,6 +227,13 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		if (this._animationController?.isPlaying())
 		{
 			this._animationController.update(this.runtime.dt);
+
+			// Sync node hierarchy with animated joint transforms
+			this._model.updateJointNodes(this._animationController);
+
+			// Update static meshes under animated joints (uses node world matrices)
+			this._model.updateStaticMeshTransforms();
+
 			this._updateSkinnedMeshes();
 		}
 
@@ -248,23 +256,16 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		vec3.set(tempVec, this.x, this.y, this.totalZElevation);
 		mat4.translate(modelRotationMatrix, modelRotationMatrix, tempVec);
 
-		// 2. R: apply rotations in same order as _buildModelViewMatrix
+		// 2. R: apply C3 angle first, then quaternion rotation (same as _buildModelViewMatrix)
 		if (this.angle !== 0)
 		{
 			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this.angle);
 		}
-		if (this._rotationX !== 0)
-		{
-			mat4.rotateX(modelRotationMatrix, modelRotationMatrix, this._rotationX * DEG_TO_RAD);
-		}
-		if (this._rotationY !== 0)
-		{
-			mat4.rotateY(modelRotationMatrix, modelRotationMatrix, this._rotationY * DEG_TO_RAD);
-		}
-		if (this._rotationZ !== 0)
-		{
-			mat4.rotateZ(modelRotationMatrix, modelRotationMatrix, this._rotationZ * DEG_TO_RAD);
-		}
+
+		// Apply quaternion rotation
+		const rotMat = mat4.create();
+		mat4.fromQuat(rotMat, this._rotationQuat);
+		mat4.multiply(modelRotationMatrix, modelRotationMatrix, rotMat);
 
 		// 3. S: scale (lighting calculation will renormalize normals)
 		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
@@ -307,11 +308,12 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		// Fallback: main thread lighting for static meshes only
 		// Skinned meshes always use worker lighting via _updateSkinnedMeshes
 		const rotMatrix = this._buildModelRotationMatrix();
+		const cameraPosition = this._getCameraPosition();
 		for (const mesh of meshes)
 		{
 			if (mesh.hasNormals && !mesh.isSkinned)
 			{
-				mesh.applyLighting(rotMatrix);
+				mesh.applyLighting(rotMatrix, false, cameraPosition);
 			}
 		}
 	}
@@ -322,24 +324,38 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	 */
 	_buildLightConfig(): {
 		ambient: Float32Array;
-		lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array }>;
-		spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number }>;
+		lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array; specularEnabled: boolean }>;
+		spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number; specularEnabled: boolean }>;
+		hemisphere?: { enabled: boolean; skyColor: Float32Array; groundColor: Float32Array; intensity: number };
+		specular?: { shininess: number; intensity: number; debugBlue?: boolean };
+		cameraPosition?: Float32Array;
 		modelMatrix: Float32Array;
 	} | undefined
 	{
 		const lights = Lighting.getAllLights();
 		const spotLights = Lighting.getAllSpotLights();
-		if (lights.length === 0 && spotLights.length === 0) return undefined;
+		const hemi = Lighting.getHemisphereLight();
+		const specularConfig = Lighting.getSpecularConfig();
+		if (lights.length === 0 && spotLights.length === 0 && !hemi.enabled) return undefined;
 
 		// Copy all arrays to avoid race conditions - these are sent to workers
 		// after flush(), but the source buffers could change between now and then
-		return {
+		const config: {
+			ambient: Float32Array;
+			lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array; specularEnabled: boolean }>;
+			spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number; specularEnabled: boolean }>;
+			hemisphere?: { enabled: boolean; skyColor: Float32Array; groundColor: Float32Array; intensity: number };
+			specular?: { shininess: number; intensity: number; debugBlue?: boolean };
+			cameraPosition?: Float32Array;
+			modelMatrix: Float32Array;
+		} = {
 			ambient: new Float32Array(Lighting.getAmbientLight()),
 			lights: lights.map(l => ({
 				enabled: l.enabled,
 				color: new Float32Array(l.color),
 				intensity: l.intensity,
-				direction: new Float32Array(l.direction)
+				direction: new Float32Array(l.direction),
+				specularEnabled: l.specularEnabled
 			})),
 			spotLights: spotLights.map(l => ({
 				enabled: l.enabled,
@@ -350,10 +366,67 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 				innerConeAngle: l.innerConeAngle,
 				outerConeAngle: l.outerConeAngle,
 				falloffExponent: l.falloffExponent,
-				range: l.range
+				range: l.range,
+				specularEnabled: l.specularEnabled
 			})),
 			modelMatrix: new Float32Array(this._buildModelRotationMatrix())
 		};
+
+		// Add hemisphere light if enabled
+		if (hemi.enabled) {
+			config.hemisphere = {
+				enabled: true,
+				skyColor: new Float32Array(hemi.skyColor),
+				groundColor: new Float32Array(hemi.groundColor),
+				intensity: hemi.intensity
+			};
+		}
+
+		// Add specular config and camera position if specular intensity > 0
+		if (specularConfig.intensity > 0 || specularConfig.debugBlue) {
+			config.specular = {
+				shininess: specularConfig.shininess,
+				intensity: specularConfig.intensity,
+				debugBlue: specularConfig.debugBlue
+			};
+			config.cameraPosition = this._getCameraPosition();
+
+			// Store camera for debug function
+			Lighting.setDebugCamera(config.cameraPosition);
+		}
+
+		return config;
+	}
+
+	/**
+	 * Get camera world position from C3's 3D Camera object.
+	 */
+	_getCameraPosition(): Float32Array {
+		try {
+			// Get 3D Camera from C3 runtime objects (single global plugin, no instances)
+			const camera = (this.runtime as any).objects?.["3DCamera"];
+
+			if (camera) {
+				const camPos = new Float32Array(camera.getCameraPosition());
+				console.log("[Specular] Camera position:", camPos[0].toFixed(1), camPos[1].toFixed(1), camPos[2].toFixed(1));
+				Lighting.setDebugCamera(camPos);
+				return camPos;
+			}
+
+			// Fallback: use layout scroll position
+			console.log("[Specular] No 3DCamera found, using fallback");
+			const layout = this.runtime.layout;
+			const camPos = new Float32Array([
+				layout.scrollX,
+				layout.scrollY,
+				500  // Default Z
+			]);
+			Lighting.setDebugCamera(camPos);
+			return camPos;
+		} catch (e) {
+			console.error("[Specular] Error getting camera position:", e);
+			return new Float32Array([0, 0, 500]);
+		}
 	}
 
 	/**
@@ -489,7 +562,139 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		this._rotationX = x;
 		this._rotationY = y;
 		this._rotationZ = z;
+		// Keep quaternion in sync
+		this._updateQuatFromEuler();
 	}
+
+	// ========================================================================
+	// Quaternion Rotation Methods
+	// ========================================================================
+
+	/**
+	 * Update internal quaternion from current euler angles (rotationX/Y/Z).
+	 * Called when euler angles change to keep quaternion in sync.
+	 */
+	_updateQuatFromEuler(): void
+	{
+		// Build quaternion from euler angles in the same order as _buildModelViewMatrix
+		// Order: Z (rotationZ) * Y (rotationY) * X (rotationX)
+		// Note: C3's angle property is handled separately in the matrix builder
+		const rx = this._rotationX * DEG_TO_RAD;
+		const ry = this._rotationY * DEG_TO_RAD;
+		const rz = this._rotationZ * DEG_TO_RAD;
+
+		// Create quaternion from euler angles (XYZ order)
+		quat.fromEuler(this._rotationQuat, this._rotationX, this._rotationY, this._rotationZ);
+	}
+
+	/**
+	 * Set rotation using a quaternion (x, y, z, w).
+	 * This directly sets the 3D rotation, bypassing euler angles.
+	 * @param x Quaternion X component
+	 * @param y Quaternion Y component
+	 * @param z Quaternion Z component
+	 * @param w Quaternion W component
+	 */
+	_setRotationQuaternion(x: number, y: number, z: number, w: number): void
+	{
+		this._rotationQuat[0] = x;
+		this._rotationQuat[1] = y;
+		this._rotationQuat[2] = z;
+		this._rotationQuat[3] = w;
+
+		// Normalize to ensure valid rotation
+		quat.normalize(this._rotationQuat, this._rotationQuat);
+
+		// Update euler angles to stay in sync (approximate, may have gimbal lock issues)
+		this._updateEulerFromQuat();
+	}
+
+	/**
+	 * Set rotation from a JSON string: {"x":0,"y":0,"z":0,"w":1}
+	 */
+	_setRotationQuaternionJson(json: string): void
+	{
+		try
+		{
+			const obj = JSON.parse(json);
+			if (typeof obj.x === "number" && typeof obj.y === "number" &&
+				typeof obj.z === "number" && typeof obj.w === "number")
+			{
+				this._setRotationQuaternion(obj.x, obj.y, obj.z, obj.w);
+			}
+		}
+		catch (e)
+		{
+			debugWarn("Invalid quaternion JSON:", json);
+		}
+	}
+
+	/**
+	 * Get rotation quaternion as [x, y, z, w].
+	 */
+	_getRotationQuaternion(): [number, number, number, number]
+	{
+		return [
+			this._rotationQuat[0],
+			this._rotationQuat[1],
+			this._rotationQuat[2],
+			this._rotationQuat[3]
+		];
+	}
+
+	/**
+	 * Get rotation quaternion as JSON string.
+	 */
+	_getRotationQuaternionJson(): string
+	{
+		return JSON.stringify({
+			x: this._rotationQuat[0],
+			y: this._rotationQuat[1],
+			z: this._rotationQuat[2],
+			w: this._rotationQuat[3]
+		});
+	}
+
+	/**
+	 * Update euler angles from current quaternion.
+	 * Called when quaternion is set directly to keep euler in sync.
+	 * Note: Euler extraction can have gimbal lock issues.
+	 */
+	_updateEulerFromQuat(): void
+	{
+		// Extract euler angles from quaternion
+		// gl-matrix doesn't have a direct quat-to-euler, so we convert via matrix
+		const m = mat4.create();
+		mat4.fromQuat(m, this._rotationQuat);
+
+		// Extract euler angles (same formula as _extractBoneRotation)
+		let rotX: number, rotY: number, rotZ: number;
+
+		if (Math.abs(m[8]) < 0.99999)
+		{
+			rotY = Math.asin(-m[8]);
+			rotX = Math.atan2(m[9], m[10]);
+			rotZ = Math.atan2(m[4], m[0]);
+		}
+		else
+		{
+			rotY = m[8] < 0 ? Math.PI / 2 : -Math.PI / 2;
+			rotX = Math.atan2(-m[6], m[5]);
+			rotZ = 0;
+		}
+
+		this._rotationX = rotX * RAD_TO_DEG;
+		this._rotationY = rotY * RAD_TO_DEG;
+		this._rotationZ = rotZ * RAD_TO_DEG;
+	}
+
+	/**
+	 * Get individual quaternion components for expressions.
+	 */
+	_getQuatX(): number { return this._rotationQuat[0]; }
+	_getQuatY(): number { return this._rotationQuat[1]; }
+	_getQuatZ(): number { return this._rotationQuat[2]; }
+	_getQuatW(): number { return this._rotationQuat[3]; }
 
 	// Scale getters - GPU data stays static, only transform matrix changes
 	_getScaleX(): number
@@ -1109,6 +1314,348 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_hasEnabledSpotLights(): boolean
 	{
 		return Lighting.hasEnabledSpotLights();
+	}
+
+	// ========================================================================
+	// Hemisphere Light Methods
+	// ========================================================================
+
+	/**
+	 * Enable or disable hemisphere lighting.
+	 */
+	_setHemisphereLightEnabled(enabled: boolean): void
+	{
+		Lighting.setHemisphereLightEnabled(enabled);
+	}
+
+	/**
+	 * Check if hemisphere lighting is enabled.
+	 */
+	_isHemisphereLightEnabled(): boolean
+	{
+		return Lighting.isHemisphereLightEnabled();
+	}
+
+	/**
+	 * Set hemisphere light sky color (RGB 0-1).
+	 */
+	_setHemisphereLightSkyColor(r: number, g: number, b: number): void
+	{
+		Lighting.setHemisphereLightSkyColor(r, g, b);
+	}
+
+	/**
+	 * Set hemisphere light ground color (RGB 0-1).
+	 */
+	_setHemisphereLightGroundColor(r: number, g: number, b: number): void
+	{
+		Lighting.setHemisphereLightGroundColor(r, g, b);
+	}
+
+	/**
+	 * Set hemisphere light intensity.
+	 */
+	_setHemisphereLightIntensity(intensity: number): void
+	{
+		Lighting.setHemisphereLightIntensity(intensity);
+	}
+
+	/**
+	 * Get hemisphere light intensity.
+	 */
+	_getHemisphereLightIntensity(): number
+	{
+		return Lighting.getHemisphereLight().intensity;
+	}
+
+	/**
+	 * Get hemisphere light sky color as [r, g, b].
+	 */
+	_getHemisphereLightSkyColor(): [number, number, number]
+	{
+		const sky = Lighting.getHemisphereLight().skyColor;
+		return [sky[0], sky[1], sky[2]];
+	}
+
+	/**
+	 * Get hemisphere light ground color as [r, g, b].
+	 */
+	_getHemisphereLightGroundColor(): [number, number, number]
+	{
+		const ground = Lighting.getHemisphereLight().groundColor;
+		return [ground[0], ground[1], ground[2]];
+	}
+
+	// ========================================================================
+	// Bone Attachment Methods
+	// ========================================================================
+
+	/**
+	 * Get world position of a bone/node by name.
+	 * For skinned models: returns animated bone position
+	 * For non-skinned models: returns static node position
+	 * Includes instance TRS (position, rotation, scale).
+	 *
+	 * @param name Bone/node name
+	 * @returns [x, y, z] world coordinates, or null if not found
+	 */
+	_getBonePosition(name: string): [number, number, number] | null
+	{
+		if (!this._model?.isLoaded) return null;
+
+		// Try animated bone first (skinned model)
+		if (this._animationController)
+		{
+			const jointIndex = this._animationController.getJointIndexByName(name);
+			if (jointIndex >= 0)
+			{
+				const jointMatrix = this._animationController.getJointWorldMatrix(jointIndex);
+				if (jointMatrix)
+				{
+					return this._transformBoneToWorld(jointMatrix);
+				}
+			}
+		}
+
+		// Fall back to static node transform (non-skinned)
+		const nodeMatrix = this._model.getNodeWorldMatrix(name);
+		if (nodeMatrix)
+		{
+			return this._transformBoneToWorld(nodeMatrix);
+		}
+
+		return null;
+	}
+
+	/**
+	 * Transform a bone/node local matrix to world coordinates.
+	 * Applies: objectTRS * boneMatrix * origin
+	 */
+	_transformBoneToWorld(boneMatrix: Float32Array): [number, number, number]
+	{
+		// Build object transform matrix (same as _buildModelViewMatrix but without camera MV)
+		const objectMatrix = mat4.create();
+
+		// 1. T(position)
+		vec3.set(tempVec, this.x, this.y, this.totalZElevation);
+		mat4.translate(objectMatrix, objectMatrix, tempVec);
+
+		// 2. R: apply C3 angle first, then quaternion rotation
+		if (this.angle !== 0)
+		{
+			mat4.rotateZ(objectMatrix, objectMatrix, this.angle);
+		}
+
+		// Apply quaternion rotation
+		const rotMat = mat4.create();
+		mat4.fromQuat(rotMat, this._rotationQuat);
+		mat4.multiply(objectMatrix, objectMatrix, rotMat);
+
+		// 3. S(scale)
+		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
+		mat4.scale(objectMatrix, objectMatrix, tempVec);
+
+		// 4. T(-localCenter)
+		const lc = this._model!.localCenter;
+		vec3.set(tempVec, -lc[0], -lc[1], -lc[2]);
+		mat4.translate(objectMatrix, objectMatrix, tempVec);
+
+		// Combine: objectMatrix * boneMatrix
+		const combined = mat4.create();
+		mat4.multiply(combined, objectMatrix, boneMatrix);
+
+		// Extract position (translation component)
+		return [combined[12], combined[13], combined[14]];
+	}
+
+	/**
+	 * Get world rotation of a bone/node by name.
+	 * Returns euler angles in degrees.
+	 * @param name Bone/node name
+	 * @returns [rotX, rotY, rotZ] in degrees, or null if not found
+	 */
+	_getBoneRotation(name: string): [number, number, number] | null
+	{
+		if (!this._model?.isLoaded) return null;
+
+		let boneMatrix: Float32Array | null = null;
+
+		// Try animated bone first (skinned model)
+		if (this._animationController)
+		{
+			const jointIndex = this._animationController.getJointIndexByName(name);
+			if (jointIndex >= 0)
+			{
+				boneMatrix = this._animationController.getJointWorldMatrix(jointIndex);
+			}
+		}
+
+		// Fall back to static node transform (non-skinned)
+		if (!boneMatrix)
+		{
+			boneMatrix = this._model.getNodeWorldMatrix(name);
+		}
+
+		if (!boneMatrix) return null;
+
+		return this._extractBoneRotation(boneMatrix);
+	}
+
+	/**
+	 * Extract euler rotation from combined object+bone matrix.
+	 * Applies object rotations, then extracts euler angles.
+	 */
+	_extractBoneRotation(boneMatrix: Float32Array): [number, number, number]
+	{
+		// Build object rotation matrix (position/scale don't affect rotation extraction)
+		const objectMatrix = mat4.create();
+
+		// Apply C3 angle first, then quaternion rotation
+		if (this.angle !== 0)
+		{
+			mat4.rotateZ(objectMatrix, objectMatrix, this.angle);
+		}
+
+		// Apply quaternion rotation
+		const rotMat = mat4.create();
+		mat4.fromQuat(rotMat, this._rotationQuat);
+		mat4.multiply(objectMatrix, objectMatrix, rotMat);
+
+		// Combine: objectRotation * boneMatrix
+		const combined = mat4.create();
+		mat4.multiply(combined, objectMatrix, boneMatrix);
+
+		// Extract euler angles from rotation matrix (XYZ order)
+		// Using standard rotation matrix decomposition for column-major mat4
+		const m = combined;
+		let rotX: number, rotY: number, rotZ: number;
+
+		// Check for gimbal lock (when |m[8]| ≈ 1, meaning Y rotation ≈ ±90°)
+		if (Math.abs(m[8]) < 0.99999)
+		{
+			rotY = Math.asin(-m[8]);
+			rotX = Math.atan2(m[9], m[10]);
+			rotZ = Math.atan2(m[4], m[0]);
+		}
+		else
+		{
+			// Gimbal lock case
+			rotY = m[8] < 0 ? Math.PI / 2 : -Math.PI / 2;
+			rotX = Math.atan2(-m[6], m[5]);
+			rotZ = 0;
+		}
+
+		// Convert to degrees
+		return [
+			rotX * RAD_TO_DEG,
+			rotY * RAD_TO_DEG,
+			rotZ * RAD_TO_DEG
+		];
+	}
+
+	/**
+	 * Get 2D angle (Z rotation) of bone for sprite alignment.
+	 * This is the most common use case - rotating a 2D sprite to match bone.
+	 * @param name Bone/node name
+	 * @returns Z rotation in degrees, or 0 if not found
+	 */
+	_getBoneAngle(name: string): number
+	{
+		const rotation = this._getBoneRotation(name);
+		return rotation ? rotation[2] : 0;
+	}
+
+	/**
+	 * Get list of available bone/node names.
+	 * Combines animated joints (skinned) and static nodes (non-skinned).
+	 * @returns JSON array of names
+	 */
+	_getBoneNames(): string
+	{
+		const names = new Set<string>();
+
+		// Debug: log available sources
+		console.log("[BoneNames] animController:", !!this._animationController,
+			"model:", !!this._model,
+			"skins:", this._model?.skins?.length ?? 0,
+			"nodeNames:", this._model?.getNodeNames()?.length ?? 0);
+
+		// Source 1: Animated joint names from controller (skinned models with animation)
+		if (this._animationController)
+		{
+			const jointNames = this._animationController.getJointNames();
+			console.log("[BoneNames] Source 1 - Controller joints:", jointNames.length, JSON.stringify(jointNames));
+			for (const name of jointNames)
+			{
+				names.add(name);
+			}
+		}
+		// Source 2: Joint names directly from model skins (skinned models without controller)
+		else if (this._model?.skins)
+		{
+			console.log("[BoneNames] Source 2 - Model skins:", this._model.skins.length);
+			for (const skin of this._model.skins)
+			{
+				console.log("[BoneNames] Skin joints:", skin.joints.length, JSON.stringify(skin.joints.map(j => j.name)));
+				for (const joint of skin.joints)
+				{
+					names.add(joint.name);
+				}
+			}
+		}
+
+		// Source 3: All node names (includes generated names for unnamed nodes)
+		if (this._model)
+		{
+			const nodeNames = this._model.getNodeNames();
+			console.log("[BoneNames] Source 3 - Node names:", nodeNames.length, JSON.stringify(nodeNames));
+			for (const name of nodeNames)
+			{
+				names.add(name);
+			}
+		}
+
+		const result = JSON.stringify(Array.from(names));
+		console.log("[BoneNames] Result:", result);
+		return result;
+	}
+
+	/**
+	 * Get bone count (joints for skinned, nodes for non-skinned).
+	 */
+	_getBoneCount(): number
+	{
+		if (this._animationController)
+		{
+			return this._animationController.getJointCount();
+		}
+		if (this._model)
+		{
+			return this._model.getNodeNames().length;
+		}
+		return 0;
+	}
+
+	/**
+	 * Check if a bone/node exists by name.
+	 * @param name Bone/node name
+	 * @returns true if found
+	 */
+	_hasBone(name: string): boolean
+	{
+		// Check animated joints first
+		if (this._animationController?.hasJoint(name))
+		{
+			return true;
+		}
+
+		// Check static nodes
+		if (this._model?.hasNode(name))
+		{
+			return true;
+		}
+
+		return false;
 	}
 
 	// ========================================================================
