@@ -19,6 +19,114 @@ const meshCache = new Map();
 const skinnedMeshCache = new Map();
 const staticLightingCache = new Map();
 
+// WASM module state
+let wasmModule = null;
+let wasmMemory = null;
+let wasmExports = null;
+let wasmReady = false;
+let wasmMaxVertices = 0;
+
+// Initialize WASM module from binary
+async function initWasm(wasmBinary, maxVertices) {
+	try {
+		const module = await WebAssembly.compile(wasmBinary);
+		const instance = await WebAssembly.instantiate(module);
+		wasmExports = instance.exports;
+		wasmMemory = wasmExports.memory;
+
+		// Initialize with max vertex capacity
+		wasmExports.init(maxVertices);
+		wasmMaxVertices = maxVertices;
+		wasmReady = true;
+		return true;
+	} catch (e) {
+		console.warn('[Worker] WASM init failed, using JS fallback:', e);
+		wasmReady = false;
+		return false;
+	}
+}
+
+// Calculate lighting using WASM SIMD
+function calculateLightingWasm(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig) {
+	if (!wasmReady || vertexCount > wasmMaxVertices) {
+		return false; // Fallback to JS
+	}
+
+	const ambient = lightConfig.ambient;
+	const lights = lightConfig.lights;
+	const specular = lightConfig.specular;
+	const cameraPosition = lightConfig.cameraPosition;
+	const hemisphere = lightConfig.hemisphere;
+
+	// Set ambient
+	wasmExports.set_ambient(ambient[0], ambient[1], ambient[2]);
+
+	// Set hemisphere light
+	if (hemisphere && hemisphere.enabled) {
+		wasmExports.set_hemisphere(
+			true,
+			hemisphere.skyColor[0], hemisphere.skyColor[1], hemisphere.skyColor[2],
+			hemisphere.groundColor[0], hemisphere.groundColor[1], hemisphere.groundColor[2],
+			hemisphere.intensity
+		);
+	} else {
+		wasmExports.set_hemisphere(false, 0, 0, 0, 0, 0, 0, 0);
+	}
+
+	// Set specular config
+	if (specular) {
+		wasmExports.set_specular(specular.shininess || 32, specular.intensity || 0);
+	} else {
+		wasmExports.set_specular(32, 0);
+	}
+
+	// Set camera position
+	if (cameraPosition && cameraPosition.length >= 3) {
+		wasmExports.set_camera(cameraPosition[0], cameraPosition[1], cameraPosition[2]);
+	}
+
+	// Set directional lights (up to 4)
+	for (let i = 0; i < 4; i++) {
+		const light = lights && lights[i];
+		if (light && light.enabled) {
+			wasmExports.set_directional_light(
+				i, true,
+				light.direction[0], light.direction[1], light.direction[2],
+				light.color[0], light.color[1], light.color[2],
+				light.intensity,
+				light.specularEnabled || false
+			);
+		} else {
+			wasmExports.set_directional_light(i, false, 0, 1, 0, 1, 1, 1, 1, false);
+		}
+	}
+
+	// Copy positions and normals to WASM memory
+	const posPtr = wasmExports.get_positions_ptr();
+	const normPtr = wasmExports.get_normals_ptr();
+	const colPtr = wasmExports.get_colors_ptr();
+
+	const wasmPositions = new Float32Array(wasmMemory.buffer, posPtr, vertexCount * 3);
+	const wasmNormals = new Float32Array(wasmMemory.buffer, normPtr, vertexCount * 3);
+
+	// Copy input data (handle offsets)
+	for (let i = 0; i < vertexCount * 3; i++) {
+		wasmPositions[i] = positions ? positions[posOffset + i] : 0;
+		wasmNormals[i] = normals[normalOffset + i];
+	}
+
+	// Calculate lighting
+	wasmExports.calculate_lighting(vertexCount);
+
+	// Copy results back
+	const wasmColors = new Float32Array(wasmMemory.buffer, colPtr, vertexCount * 4);
+	for (let i = 0; i < vertexCount * 4; i++) {
+		outColors[colorOffset + i] = wasmColors[i];
+	}
+
+	return true;
+}
+
 // Transform vertices from original to output buffer at specified offset
 function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 	const m0 = matrix[0], m1 = matrix[1], m2 = matrix[2];
@@ -49,14 +157,23 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 // modelMatrix: optional 4x4 matrix to transform positions/normals to world space
 // lightConfig: { ambient, lights, spotLights }
 function calculateLighting(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig) {
+	// Try WASM SIMD path first (no spotlights or matrix transform in WASM yet)
+	const spotLights = lightConfig.spotLights || [];
+	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
+	const hasSpotLights = spotLights.length > 0;
+
+	// Use WASM for simple cases (no matrix transform, no spotlights)
+	if (wasmReady && !hasMatrix && !hasSpotLights) {
+		if (calculateLightingWasm(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig)) {
+			return; // WASM succeeded
+		}
+	}
+
+	// JS fallback path
 	const ambient = lightConfig.ambient;
 	const lights = lightConfig.lights;
-	const spotLights = lightConfig.spotLights || [];
 	const specular = lightConfig.specular;
 	const cameraPosition = lightConfig.cameraPosition;
-
-	// Extract matrix components if provided (4x4 column-major)
-	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
 
 	// Rotation/scale part (upper-left 3x3)
 	let m00 = 1, m01 = 0, m02 = 0;
@@ -72,7 +189,7 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 		tx = modelMatrix[12]; ty = modelMatrix[13]; tz = modelMatrix[14];
 	}
 
-	const hasSpotLights = spotLights.length > 0 && positions !== null;
+	const hasSpotLightsForPos = hasSpotLights && positions !== null;
 	const canDoSpecular = cameraPosition && cameraPosition.length >= 3 && positions !== null && specular && specular.intensity > 0;
 
 	for (let i = 0; i < vertexCount; i++) {
@@ -117,7 +234,7 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 		// Get vertex world position (needed for spotlights and specular)
 		let px = 0, py = 0, pz = 0;
 		let viewX = 0, viewY = 0, viewZ = 0;
-		const needsWorldPos = hasSpotLights || canDoSpecular;
+		const needsWorldPos = hasSpotLightsForPos || canDoSpecular;
 
 		if (needsWorldPos && positions) {
 			px = positions[pOff3];
@@ -199,7 +316,7 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 		}
 
 		// Accumulate contribution from all enabled spotlights
-		if (hasSpotLights) {
+		if (hasSpotLightsForPos) {
 			for (let j = 0; j < spotLights.length; j++) {
 				const spot = spotLights[j];
 				if (!spot.enabled) continue;
@@ -379,6 +496,14 @@ self.onmessage = (e) => {
 	const msg = e.data;
 
 	switch (msg.type) {
+		case "INIT_WASM": {
+			// Initialize WASM module from binary
+			initWasm(msg.wasmBinary, msg.maxVertices).then(success => {
+				self.postMessage({ type: "WASM_READY", success });
+			});
+			break;
+		}
+
 		case "REGISTER": {
 			const positions = msg.positions;
 			const vertexCount = positions.length / 3;
@@ -700,6 +825,12 @@ export class TransformWorkerPool {
 	private _workerCount: number;
 	private _disposed = false;
 
+	// WASM state
+	private _wasmInitializing = false;
+	private _wasmReady = false;
+	private _wasmReadyCount = 0;
+	private _wasmInitResolvers: Array<(success: boolean) => void> = [];
+
 	constructor(workerCount?: number) {
 		// Default: use available cores minus 1 for main thread, minimum 1, maximum 8
 		const defaultCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
@@ -721,6 +852,39 @@ export class TransformWorkerPool {
 			this._pendingSkinByWorker.set(i, []);
 			this._pendingLightingByWorker.set(i, []);
 		}
+	}
+
+	/**
+	 * Initialize WASM module in all workers for SIMD-accelerated lighting.
+	 * @param wasmBinary The compiled WASM binary (ArrayBuffer)
+	 * @param maxVertices Maximum vertices per lighting call (pre-allocates WASM memory)
+	 * @returns Promise that resolves when all workers have initialized WASM
+	 */
+	async initWasm(wasmBinary: ArrayBuffer, maxVertices: number = 100000): Promise<boolean> {
+		if (this._disposed || this._wasmInitializing) return false;
+		this._wasmInitializing = true;
+		this._wasmReadyCount = 0;
+
+		return new Promise((resolve) => {
+			this._wasmInitResolvers.push(resolve);
+
+			// Send WASM binary to all workers
+			for (const worker of this._workers) {
+				// Copy the binary for each worker (can't transfer same buffer multiple times)
+				const binaryCopy = wasmBinary.slice(0);
+				worker.postMessage(
+					{ type: "INIT_WASM", wasmBinary: binaryCopy, maxVertices },
+					[binaryCopy]
+				);
+			}
+		});
+	}
+
+	/**
+	 * Check if WASM is ready in all workers.
+	 */
+	get wasmReady(): boolean {
+		return this._wasmReady;
 	}
 
 	/**
@@ -975,7 +1139,32 @@ export class TransformWorkerPool {
 		positions?: Float32Array;
 		normals?: Float32Array | null;
 		colors?: Float32Array | null;
+		success?: boolean;
 	}): void {
+		// Handle WASM initialization response
+		if (msg.type === "WASM_READY") {
+			this._wasmReadyCount++;
+			if (msg.success) {
+				debugLog("Worker WASM ready", this._wasmReadyCount, "/", this._workerCount);
+			} else {
+				debugLog("Worker WASM failed");
+			}
+
+			// All workers responded
+			if (this._wasmReadyCount >= this._workerCount) {
+				this._wasmReady = true;
+				this._wasmInitializing = false;
+				debugLog("All workers WASM ready");
+
+				// Resolve all pending init promises
+				for (const resolve of this._wasmInitResolvers) {
+					resolve(true);
+				}
+				this._wasmInitResolvers = [];
+			}
+			return;
+		}
+
 		const isTransformResult = msg.type === "TRANSFORM_RESULTS";
 		const isSkinResult = msg.type === "SKIN_RESULTS";
 		const isLightingResult = msg.type === "LIGHTING_RESULTS";
@@ -1218,6 +1407,23 @@ class SharedWorkerPool {
 	 */
 	static get hasInstance(): boolean {
 		return SharedWorkerPool._instance !== null;
+	}
+
+	/**
+	 * Initialize WASM in the shared pool.
+	 * @param wasmBinary The WASM binary (ArrayBuffer)
+	 * @param maxVertices Maximum vertices per call
+	 */
+	static async initWasm(wasmBinary: ArrayBuffer, maxVertices: number = 100000): Promise<boolean> {
+		if (!SharedWorkerPool._instance) return false;
+		return SharedWorkerPool._instance.initWasm(wasmBinary, maxVertices);
+	}
+
+	/**
+	 * Check if WASM is ready in the shared pool.
+	 */
+	static get wasmReady(): boolean {
+		return SharedWorkerPool._instance?.wasmReady ?? false;
 	}
 }
 

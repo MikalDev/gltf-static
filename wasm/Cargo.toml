@@ -1,0 +1,19 @@
+[package]
+name = "gltf-lighting"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mikal"]
+description = "SIMD-optimized vertex lighting for glTF models"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-simd"]
