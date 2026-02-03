@@ -897,9 +897,9 @@ export class TransformWorkerPool {
 	private _wasmInitResolvers: Array<(success: boolean) => void> = [];
 
 	constructor(workerCount?: number) {
-		// Default: use available cores minus 1 for main thread, minimum 1, maximum 8
+		// Default: use available cores minus 1 for main thread, minimum 1, maximum 24
 		const defaultCount = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
-		this._workerCount = Math.min(workerCount ?? defaultCount, 8);
+		this._workerCount = Math.min(workerCount ?? defaultCount, 24);
 		this._initWorkers();
 	}
 
@@ -1407,7 +1407,7 @@ export class TransformWorkerPool {
 
 /**
  * Shared global worker pool with reference counting and per-frame batching.
- * Creates a single pool of ~8 workers shared across all models.
+ * Creates a single pool of 24 workers shared across all models.
  * Batches transform requests per frame via _tick2() flush.
  */
 class SharedWorkerPool {
@@ -1420,7 +1420,7 @@ class SharedWorkerPool {
 	 */
 	static acquire(): TransformWorkerPool {
 		if (!SharedWorkerPool._instance) {
-			SharedWorkerPool._instance = new TransformWorkerPool();
+			SharedWorkerPool._instance = new TransformWorkerPool(24);
 		}
 		SharedWorkerPool._refCount++;
 		return SharedWorkerPool._instance;

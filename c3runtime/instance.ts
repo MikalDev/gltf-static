@@ -64,6 +64,8 @@ const tempMatrix = mat4.create();
 const tempVec = vec3.create();
 const savedMV = new Float32Array(16);
 const modelRotationMatrix = mat4.create(); // For lighting normal transformation
+const tempRotMat = mat4.create(); // Reusable for quaternion rotation (avoid per-frame mat4.create())
+const pooledCameraPos = new Float32Array(3); // Reusable camera position buffer
 
 // Degrees to radians conversion factor
 const DEG_TO_RAD = Math.PI / 180;
@@ -98,6 +100,40 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	// Debug stats
 	_drawCount: number = 0;
 	_lastDrawTime: number = 0;
+
+	// Light config caching (avoid per-frame allocations)
+	// Hoisted arrays - reused via .set() to eliminate all allocations
+	_cachedConfig: {
+		ambient: Float32Array;
+		lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array; specularEnabled: boolean }>;
+		spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number; specularEnabled: boolean }>;
+		hemisphere: { enabled: boolean; skyColor: Float32Array; groundColor: Float32Array; intensity: number };
+		specular: { shininess: number; intensity: number; debugBlue?: boolean };
+		cameraPosition: Float32Array;
+		modelMatrix: Float32Array;
+	} = {
+		ambient: new Float32Array(3),
+		lights: [],
+		spotLights: [],
+		hemisphere: { enabled: false, skyColor: new Float32Array(3), groundColor: new Float32Array(3), intensity: 0 },
+		specular: { shininess: 32, intensity: 0 },
+		cameraPosition: new Float32Array(3),
+		modelMatrix: new Float32Array(16)
+	};
+	_lastLightingVersion: number = -1;
+	_lastLightCount: number = 0;
+	_lastSpotLightCount: number = 0;
+	_lastConfigX: number = NaN;  // NaN ensures first frame always updates
+	_lastConfigY: number = 0;
+	_lastConfigZ: number = 0;
+	_lastConfigAngle: number = 0;
+	_lastConfigQuatW: number = 1;
+	_lastConfigScaleX: number = 1;
+	_lastConfigScaleY: number = 1;
+	_lastConfigScaleZ: number = 1;
+	_lastCameraX: number = 0;
+	_lastCameraY: number = 0;
+	_lastCameraZ: number = 0;
 
 	constructor()
 	{
@@ -198,9 +234,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		}
 
 		// Apply quaternion rotation (replaces individual X/Y/Z euler rotations)
-		const rotMat = mat4.create();
-		mat4.fromQuat(rotMat, this._rotationQuat);
-		mat4.multiply(tempMatrix, tempMatrix, rotMat);
+		mat4.fromQuat(tempRotMat, this._rotationQuat);
+		mat4.multiply(tempMatrix, tempMatrix, tempRotMat);
 
 		// 3. S: scale
 		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
@@ -263,9 +298,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		}
 
 		// Apply quaternion rotation
-		const rotMat = mat4.create();
-		mat4.fromQuat(rotMat, this._rotationQuat);
-		mat4.multiply(modelRotationMatrix, modelRotationMatrix, rotMat);
+		mat4.fromQuat(tempRotMat, this._rotationQuat);
+		mat4.multiply(modelRotationMatrix, modelRotationMatrix, tempRotMat);
 
 		// 3. S: scale (lighting calculation will renormalize normals)
 		vec3.set(tempVec, this._scaleX, this._scaleY, this._scaleZ);
@@ -320,7 +354,8 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 	/**
 	 * Build lighting configuration for worker-based lighting calculation.
-	 * Creates copies of all arrays to avoid race conditions with shared buffers.
+	 * Uses hoisted arrays with .set() to eliminate all per-frame allocations.
+	 * Arrays are cloned by postMessage (not transferred), so reuse is safe.
 	 */
 	_buildLightConfig(): {
 		ambient: Float32Array;
@@ -338,64 +373,121 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		const specularConfig = Lighting.getSpecularConfig();
 		if (lights.length === 0 && spotLights.length === 0 && !hemi.enabled) return undefined;
 
-		// Copy all arrays to avoid race conditions - these are sent to workers
-		// after flush(), but the source buffers could change between now and then
-		const config: {
-			ambient: Float32Array;
-			lights: Array<{ enabled: boolean; color: Float32Array; intensity: number; direction: Float32Array; specularEnabled: boolean }>;
-			spotLights: Array<{ enabled: boolean; color: Float32Array; intensity: number; position: Float32Array; direction: Float32Array; innerConeAngle: number; outerConeAngle: number; falloffExponent: number; range: number; specularEnabled: boolean }>;
-			hemisphere?: { enabled: boolean; skyColor: Float32Array; groundColor: Float32Array; intensity: number };
-			specular?: { shininess: number; intensity: number; debugBlue?: boolean };
-			cameraPosition?: Float32Array;
-			modelMatrix: Float32Array;
-		} = {
-			ambient: new Float32Array(Lighting.getAmbientLight()),
-			lights: lights.map(l => ({
-				enabled: l.enabled,
-				color: new Float32Array(l.color),
-				intensity: l.intensity,
-				direction: new Float32Array(l.direction),
-				specularEnabled: l.specularEnabled
-			})),
-			spotLights: spotLights.map(l => ({
-				enabled: l.enabled,
-				color: new Float32Array(l.color),
-				intensity: l.intensity,
-				position: new Float32Array(l.position),
-				direction: new Float32Array(l.direction),
-				innerConeAngle: l.innerConeAngle,
-				outerConeAngle: l.outerConeAngle,
-				falloffExponent: l.falloffExponent,
-				range: l.range,
-				specularEnabled: l.specularEnabled
-			})),
-			modelMatrix: new Float32Array(this._buildModelRotationMatrix())
-		};
+		const currentVersion = Lighting.getVersion();
+		const camPos = this._getCameraPosition();
+		const cfg = this._cachedConfig;
 
-		// Add hemisphere light if enabled
+		// Check if anything changed
+		const lightingChanged = currentVersion !== this._lastLightingVersion;
+		const transformChanged =
+			this.x !== this._lastConfigX ||
+			this.y !== this._lastConfigY ||
+			this.totalZElevation !== this._lastConfigZ ||
+			this.angle !== this._lastConfigAngle ||
+			this._rotationQuat[3] !== this._lastConfigQuatW ||
+			this._scaleX !== this._lastConfigScaleX ||
+			this._scaleY !== this._lastConfigScaleY ||
+			this._scaleZ !== this._lastConfigScaleZ;
+		const cameraChanged =
+			camPos[0] !== this._lastCameraX ||
+			camPos[1] !== this._lastCameraY ||
+			camPos[2] !== this._lastCameraZ;
+
+		// Early exit if nothing changed
+		if (!lightingChanged && !transformChanged && !cameraChanged) {
+			return cfg;
+		}
+
+		// Update tracking state
+		this._lastLightingVersion = currentVersion;
+		this._lastConfigX = this.x;
+		this._lastConfigY = this.y;
+		this._lastConfigZ = this.totalZElevation;
+		this._lastConfigAngle = this.angle;
+		this._lastConfigQuatW = this._rotationQuat[3];
+		this._lastConfigScaleX = this._scaleX;
+		this._lastConfigScaleY = this._scaleY;
+		this._lastConfigScaleZ = this._scaleZ;
+		this._lastCameraX = camPos[0];
+		this._lastCameraY = camPos[1];
+		this._lastCameraZ = camPos[2];
+
+		// Update ambient (always 3 floats, just .set())
+		cfg.ambient.set(Lighting.getAmbientLight());
+
+		// Update directional lights - only reallocate if count changed
+		if (lights.length !== this._lastLightCount) {
+			cfg.lights = lights.map(() => ({
+				enabled: false,
+				color: new Float32Array(3),
+				intensity: 0,
+				direction: new Float32Array(3),
+				specularEnabled: false
+			}));
+			this._lastLightCount = lights.length;
+		}
+		for (let i = 0; i < lights.length; i++) {
+			const src = lights[i];
+			const dst = cfg.lights[i];
+			dst.enabled = src.enabled;
+			dst.color.set(src.color);
+			dst.intensity = src.intensity;
+			dst.direction.set(src.direction);
+			dst.specularEnabled = src.specularEnabled;
+		}
+
+		// Update spotlights - only reallocate if count changed
+		if (spotLights.length !== this._lastSpotLightCount) {
+			cfg.spotLights = spotLights.map(() => ({
+				enabled: false,
+				color: new Float32Array(3),
+				intensity: 0,
+				position: new Float32Array(3),
+				direction: new Float32Array(3),
+				innerConeAngle: 0,
+				outerConeAngle: 0,
+				falloffExponent: 1,
+				range: 0,
+				specularEnabled: false
+			}));
+			this._lastSpotLightCount = spotLights.length;
+		}
+		for (let i = 0; i < spotLights.length; i++) {
+			const src = spotLights[i];
+			const dst = cfg.spotLights[i];
+			dst.enabled = src.enabled;
+			dst.color.set(src.color);
+			dst.intensity = src.intensity;
+			dst.position.set(src.position);
+			dst.direction.set(src.direction);
+			dst.innerConeAngle = src.innerConeAngle;
+			dst.outerConeAngle = src.outerConeAngle;
+			dst.falloffExponent = src.falloffExponent;
+			dst.range = src.range;
+			dst.specularEnabled = src.specularEnabled;
+		}
+
+		// Update model matrix (reuse the 16-float array)
+		cfg.modelMatrix.set(this._buildModelRotationMatrix());
+
+		// Update hemisphere light
+		cfg.hemisphere.enabled = hemi.enabled;
 		if (hemi.enabled) {
-			config.hemisphere = {
-				enabled: true,
-				skyColor: new Float32Array(hemi.skyColor),
-				groundColor: new Float32Array(hemi.groundColor),
-				intensity: hemi.intensity
-			};
+			cfg.hemisphere.skyColor.set(hemi.skyColor);
+			cfg.hemisphere.groundColor.set(hemi.groundColor);
+			cfg.hemisphere.intensity = hemi.intensity;
 		}
 
-		// Add specular config and camera position if specular intensity > 0
+		// Update specular config and camera position
+		cfg.specular.shininess = specularConfig.shininess;
+		cfg.specular.intensity = specularConfig.intensity;
+		cfg.specular.debugBlue = specularConfig.debugBlue;
 		if (specularConfig.intensity > 0 || specularConfig.debugBlue) {
-			config.specular = {
-				shininess: specularConfig.shininess,
-				intensity: specularConfig.intensity,
-				debugBlue: specularConfig.debugBlue
-			};
-			config.cameraPosition = this._getCameraPosition();
-
-			// Store camera for debug function
-			Lighting.setDebugCamera(config.cameraPosition);
+			cfg.cameraPosition.set(camPos);
+			Lighting.setDebugCamera(cfg.cameraPosition);
 		}
 
-		return config;
+		return cfg;
 	}
 
 	/**
@@ -407,24 +499,27 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 			const camera = (this.runtime as any).objects?.["3DCamera"];
 
 			if (camera) {
-				const camPos = new Float32Array(camera.getCameraPosition());
-				Lighting.setDebugCamera(camPos);
-				return camPos;
+				const pos = camera.getCameraPosition();
+				pooledCameraPos[0] = pos[0];
+				pooledCameraPos[1] = pos[1];
+				pooledCameraPos[2] = pos[2];
+				Lighting.setDebugCamera(pooledCameraPos);
+				return pooledCameraPos;
 			}
 
 			// Fallback: use layout scroll position
-			console.log("[Specular] No 3DCamera found, using fallback");
 			const layout = this.runtime.layout;
-			const camPos = new Float32Array([
-				layout.scrollX,
-				layout.scrollY,
-				500  // Default Z
-			]);
-			Lighting.setDebugCamera(camPos);
-			return camPos;
+			pooledCameraPos[0] = layout.scrollX;
+			pooledCameraPos[1] = layout.scrollY;
+			pooledCameraPos[2] = 500;  // Default Z
+			Lighting.setDebugCamera(pooledCameraPos);
+			return pooledCameraPos;
 		} catch (e) {
 			console.error("[Specular] Error getting camera position:", e);
-			return new Float32Array([0, 0, 500]);
+			pooledCameraPos[0] = 0;
+			pooledCameraPos[1] = 0;
+			pooledCameraPos[2] = 500;
+			return pooledCameraPos;
 		}
 	}
 
