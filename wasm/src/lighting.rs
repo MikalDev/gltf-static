@@ -207,7 +207,108 @@ pub fn calculate_lighting_simd(
             }
         }
 
-        // TODO: Spotlights (more complex, add in Phase 4)
+        // Spotlights
+        for spot in spotlights.iter() {
+            if !spot.enabled { continue; }
+
+            // Light position
+            let light_px = f32x4_splat(spot.position[0]);
+            let light_py = f32x4_splat(spot.position[1]);
+            let light_pz = f32x4_splat(spot.position[2]);
+
+            // Vector from light to vertex
+            let dx = f32x4_sub(px, light_px);
+            let dy = f32x4_sub(py, light_py);
+            let dz = f32x4_sub(pz, light_pz);
+
+            // Distance
+            let dist_sq = simd::dot3(dx, dy, dz, dx, dy, dz);
+            let dist = f32x4_sqrt(dist_sq);
+
+            // Skip if too close (avoid div by zero)
+            let epsilon = f32x4_splat(0.0001);
+            let safe_dist = f32x4_max(dist, epsilon);
+            let inv_dist = f32x4_div(f32x4_splat(1.0), safe_dist);
+
+            // Normalize direction from light to vertex
+            let to_vert_x = f32x4_mul(dx, inv_dist);
+            let to_vert_y = f32x4_mul(dy, inv_dist);
+            let to_vert_z = f32x4_mul(dz, inv_dist);
+
+            // Angular falloff: dot(spotDir, toVert)
+            let spot_dir_x = f32x4_splat(spot.direction[0]);
+            let spot_dir_y = f32x4_splat(spot.direction[1]);
+            let spot_dir_z = f32x4_splat(spot.direction[2]);
+            let cos_angle = simd::dot3(spot_dir_x, spot_dir_y, spot_dir_z, to_vert_x, to_vert_y, to_vert_z);
+
+            // Cone attenuation
+            let inner_cos = f32x4_splat(spot.inner_cos);
+            let outer_cos = f32x4_splat(spot.outer_cos);
+            let zero = f32x4_splat(0.0);
+            let one = f32x4_splat(1.0);
+
+            // t = (cos - outer) / (inner - outer), clamped to [0, 1]
+            let cone_range = f32x4_sub(inner_cos, outer_cos);
+            let t = f32x4_div(f32x4_sub(cos_angle, outer_cos), f32x4_max(cone_range, epsilon));
+            let t_clamped = f32x4_min(f32x4_max(t, zero), one);
+            let angular_atten = simd::pow4(t_clamped, spot.falloff);
+
+            // Distance attenuation
+            let dist_atten = if spot.range > 0.0 {
+                let range = f32x4_splat(spot.range);
+                let norm_dist = f32x4_div(dist, range);
+                let range_atten = f32x4_sub(one, f32x4_mul(norm_dist, norm_dist));
+                let range_atten_clamped = f32x4_max(range_atten, zero);
+                f32x4_mul(range_atten_clamped, range_atten_clamped)
+            } else {
+                f32x4_div(one, f32x4_add(one, dist_sq))
+            };
+
+            // N dot L (light direction is negative of toVert)
+            let light_dir_x = f32x4_neg(to_vert_x);
+            let light_dir_y = f32x4_neg(to_vert_y);
+            let light_dir_z = f32x4_neg(to_vert_z);
+            let ndotl = simd::dot3(nx, ny, nz, light_dir_x, light_dir_y, light_dir_z);
+            let ndotl_clamped = f32x4_max(ndotl, zero);
+
+            // Combined attenuation
+            let total_atten = f32x4_mul(f32x4_mul(angular_atten, dist_atten), f32x4_splat(spot.intensity));
+            let contrib = f32x4_mul(ndotl_clamped, total_atten);
+
+            // Add diffuse contribution
+            r = f32x4_add(r, f32x4_mul(f32x4_splat(spot.color[0]), contrib));
+            g = f32x4_add(g, f32x4_mul(f32x4_splat(spot.color[1]), contrib));
+            b = f32x4_add(b, f32x4_mul(f32x4_splat(spot.color[2]), contrib));
+
+            // Specular for spotlight
+            if spot.specular_enabled && specular.intensity > 0.0 {
+                let cam_x = f32x4_splat(camera_pos[0]);
+                let cam_y = f32x4_splat(camera_pos[1]);
+                let cam_z = f32x4_splat(camera_pos[2]);
+
+                let (view_x, view_y, view_z) = simd::normalize3(
+                    f32x4_sub(cam_x, px),
+                    f32x4_sub(cam_y, py),
+                    f32x4_sub(cam_z, pz),
+                );
+
+                let (half_x, half_y, half_z) = simd::normalize3(
+                    f32x4_add(light_dir_x, view_x),
+                    f32x4_add(light_dir_y, view_y),
+                    f32x4_add(light_dir_z, view_z),
+                );
+
+                let ndoth = simd::dot3(nx, ny, nz, half_x, half_y, half_z);
+                let ndoth_clamped = f32x4_max(ndoth, zero);
+
+                let spec = simd::pow4(ndoth_clamped, specular.shininess);
+                let spec_contrib = f32x4_mul(f32x4_mul(spec, f32x4_splat(specular.intensity)), total_atten);
+
+                r = f32x4_add(r, f32x4_mul(f32x4_splat(spot.color[0]), spec_contrib));
+                g = f32x4_add(g, f32x4_mul(f32x4_splat(spot.color[1]), spec_contrib));
+                b = f32x4_add(b, f32x4_mul(f32x4_splat(spot.color[2]), spec_contrib));
+            }
+        }
 
         // Clamp to [0, 1]
         let zero = f32x4_splat(0.0);
@@ -252,6 +353,60 @@ pub fn calculate_lighting_simd(
                 r += light.color[0] * contrib;
                 g += light.color[1] * contrib;
                 b += light.color[2] * contrib;
+            }
+        }
+
+        // Spotlights (scalar)
+        let px = positions[pos_idx];
+        let py = positions[pos_idx + 1];
+        let pz = positions[pos_idx + 2];
+
+        for spot in spotlights.iter() {
+            if !spot.enabled { continue; }
+
+            let dx = px - spot.position[0];
+            let dy = py - spot.position[1];
+            let dz = pz - spot.position[2];
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            let dist = dist_sq.sqrt();
+
+            if dist < 0.0001 { continue; }
+
+            let inv_dist = 1.0 / dist;
+            let to_vert_x = dx * inv_dist;
+            let to_vert_y = dy * inv_dist;
+            let to_vert_z = dz * inv_dist;
+
+            let cos_angle = spot.direction[0] * to_vert_x + spot.direction[1] * to_vert_y + spot.direction[2] * to_vert_z;
+
+            if cos_angle <= spot.outer_cos { continue; }
+
+            let angular_atten = if cos_angle >= spot.inner_cos {
+                1.0
+            } else {
+                let t = (cos_angle - spot.outer_cos) / (spot.inner_cos - spot.outer_cos);
+                t.powf(spot.falloff)
+            };
+
+            let dist_atten = if spot.range > 0.0 {
+                if dist >= spot.range { continue; }
+                let norm_dist = dist / spot.range;
+                let range_atten = 1.0 - norm_dist * norm_dist;
+                range_atten * range_atten
+            } else {
+                1.0 / (1.0 + dist_sq)
+            };
+
+            let light_dir_x = -to_vert_x;
+            let light_dir_y = -to_vert_y;
+            let light_dir_z = -to_vert_z;
+            let ndotl = nx * light_dir_x + ny * light_dir_y + nz * light_dir_z;
+
+            if ndotl > 0.0 {
+                let contrib = ndotl * spot.intensity * angular_atten * dist_atten;
+                r += spot.color[0] * contrib;
+                g += spot.color[1] * contrib;
+                b += spot.color[2] * contrib;
             }
         }
 

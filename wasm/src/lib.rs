@@ -24,6 +24,15 @@ static mut HEMISPHERE: lighting::HemisphereLight = lighting::HemisphereLight::DI
 static mut SPECULAR: lighting::SpecularConfig = lighting::SpecularConfig::DEFAULT;
 static mut CAMERA_POS: [f32; 3] = [0.0, 0.0, 0.0];
 
+// Model matrix (4x4 column-major, identity by default)
+static mut MODEL_MATRIX: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+static mut HAS_MODEL_MATRIX: bool = false;
+
 /// Initialize the module with maximum vertex capacity
 #[wasm_bindgen]
 pub fn init(max_vertices: u32) -> bool {
@@ -147,6 +156,41 @@ pub fn set_specular(shininess: f32, intensity: f32) {
 pub fn set_camera(x: f32, y: f32, z: f32) {
     unsafe {
         CAMERA_POS = [x, y, z];
+    }
+}
+
+/// Set model matrix for position/normal transformation (4x4 column-major)
+/// Pass all zeros to disable matrix transform
+#[wasm_bindgen]
+pub fn set_model_matrix(
+    m0: f32, m1: f32, m2: f32, m3: f32,
+    m4: f32, m5: f32, m6: f32, m7: f32,
+    m8: f32, m9: f32, m10: f32, m11: f32,
+    m12: f32, m13: f32, m14: f32, m15: f32,
+) {
+    unsafe {
+        // Check if this is an identity or disabled matrix
+        let is_identity = m0 == 1.0 && m1 == 0.0 && m2 == 0.0 && m3 == 0.0
+            && m4 == 0.0 && m5 == 1.0 && m6 == 0.0 && m7 == 0.0
+            && m8 == 0.0 && m9 == 0.0 && m10 == 1.0 && m11 == 0.0
+            && m12 == 0.0 && m13 == 0.0 && m14 == 0.0 && m15 == 1.0;
+
+        HAS_MODEL_MATRIX = !is_identity;
+        MODEL_MATRIX = [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15];
+    }
+}
+
+/// Clear model matrix (use identity)
+#[wasm_bindgen]
+pub fn clear_model_matrix() {
+    unsafe {
+        HAS_MODEL_MATRIX = false;
+        MODEL_MATRIX = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
     }
 }
 

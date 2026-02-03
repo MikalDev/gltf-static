@@ -101,6 +101,27 @@ function calculateLightingWasm(positions, normals, outColors, posOffset, normalO
 		}
 	}
 
+	// Set spotlights (up to 8)
+	const spotLights = lightConfig.spotLights || [];
+	for (let i = 0; i < 8; i++) {
+		const spot = spotLights[i];
+		if (spot && spot.enabled) {
+			wasmExports.set_spotlight(
+				i, true,
+				spot.position[0], spot.position[1], spot.position[2],
+				spot.direction[0], spot.direction[1], spot.direction[2],
+				spot.color[0], spot.color[1], spot.color[2],
+				spot.intensity,
+				spot.innerConeAngle, spot.outerConeAngle,
+				spot.falloffExponent || 1.0,
+				spot.range || 0,
+				spot.specularEnabled || false
+			);
+		} else {
+			wasmExports.set_spotlight(i, false, 0, 0, 0, 0, -1, 0, 1, 1, 1, 1, 0.5, 0.7, 1, 0, false);
+		}
+	}
+
 	// Copy positions and normals to WASM memory
 	const posPtr = wasmExports.get_positions_ptr();
 	const normPtr = wasmExports.get_normals_ptr();
@@ -109,10 +130,54 @@ function calculateLightingWasm(positions, normals, outColors, posOffset, normalO
 	const wasmPositions = new Float32Array(wasmMemory.buffer, posPtr, vertexCount * 3);
 	const wasmNormals = new Float32Array(wasmMemory.buffer, normPtr, vertexCount * 3);
 
-	// Copy input data (handle offsets)
-	for (let i = 0; i < vertexCount * 3; i++) {
-		wasmPositions[i] = positions ? positions[posOffset + i] : 0;
-		wasmNormals[i] = normals[normalOffset + i];
+	// Check for matrix transform
+	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
+
+	if (hasMatrix) {
+		// Extract matrix components (4x4 column-major)
+		const m00 = modelMatrix[0], m01 = modelMatrix[4], m02 = modelMatrix[8];
+		const m10 = modelMatrix[1], m11 = modelMatrix[5], m12 = modelMatrix[9];
+		const m20 = modelMatrix[2], m21 = modelMatrix[6], m22 = modelMatrix[10];
+		const tx = modelMatrix[12], ty = modelMatrix[13], tz = modelMatrix[14];
+
+		// Transform positions and normals while copying
+		for (let i = 0; i < vertexCount; i++) {
+			const srcIdx = i * 3;
+			const px = positions ? positions[posOffset + srcIdx] : 0;
+			const py = positions ? positions[posOffset + srcIdx + 1] : 0;
+			const pz = positions ? positions[posOffset + srcIdx + 2] : 0;
+
+			// Transform position
+			wasmPositions[srcIdx] = m00 * px + m01 * py + m02 * pz + tx;
+			wasmPositions[srcIdx + 1] = m10 * px + m11 * py + m12 * pz + ty;
+			wasmPositions[srcIdx + 2] = m20 * px + m21 * py + m22 * pz + tz;
+
+			// Transform and normalize normal
+			const nx = normals[normalOffset + srcIdx];
+			const ny = normals[normalOffset + srcIdx + 1];
+			const nz = normals[normalOffset + srcIdx + 2];
+
+			const wnx = m00 * nx + m01 * ny + m02 * nz;
+			const wny = m10 * nx + m11 * ny + m12 * nz;
+			const wnz = m20 * nx + m21 * ny + m22 * nz;
+			const len = Math.sqrt(wnx * wnx + wny * wny + wnz * wnz);
+
+			if (len > 0.0001) {
+				wasmNormals[srcIdx] = wnx / len;
+				wasmNormals[srcIdx + 1] = wny / len;
+				wasmNormals[srcIdx + 2] = wnz / len;
+			} else {
+				wasmNormals[srcIdx] = nx;
+				wasmNormals[srcIdx + 1] = ny;
+				wasmNormals[srcIdx + 2] = nz;
+			}
+		}
+	} else {
+		// Direct copy (no transform)
+		for (let i = 0; i < vertexCount * 3; i++) {
+			wasmPositions[i] = positions ? positions[posOffset + i] : 0;
+			wasmNormals[i] = normals[normalOffset + i];
+		}
 	}
 
 	// Calculate lighting
@@ -157,13 +222,13 @@ function transformVerticesInto(original, output, offset, matrix, vertexCount) {
 // modelMatrix: optional 4x4 matrix to transform positions/normals to world space
 // lightConfig: { ambient, lights, spotLights }
 function calculateLighting(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig) {
-	// Try WASM SIMD path first (no spotlights or matrix transform in WASM yet)
+	// Try WASM SIMD path first (handles all cases now)
 	const spotLights = lightConfig.spotLights || [];
 	const hasMatrix = modelMatrix && modelMatrix.length >= 16;
 	const hasSpotLights = spotLights.length > 0;
 
-	// Use WASM for simple cases (no matrix transform, no spotlights)
-	if (wasmReady && !hasMatrix && !hasSpotLights) {
+	// Use WASM for all cases (matrix transform handled in JS before WASM call)
+	if (wasmReady) {
 		if (calculateLightingWasm(positions, normals, outColors, posOffset, normalOffset, colorOffset, vertexCount, modelMatrix, lightConfig)) {
 			return; // WASM succeeded
 		}
