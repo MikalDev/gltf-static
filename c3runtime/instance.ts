@@ -408,7 +408,6 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 
 			if (camera) {
 				const camPos = new Float32Array(camera.getCameraPosition());
-				console.log("[Specular] Camera position:", camPos[0].toFixed(1), camPos[1].toFixed(1), camPos[2].toFixed(1));
 				Lighting.setDebugCamera(camPos);
 				return camPos;
 			}

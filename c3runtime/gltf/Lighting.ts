@@ -855,9 +855,9 @@ export function calculateMeshLighting(
 							if (Math.abs(NdotH) > 0.01) {
 								b += 1.0;
 							}
-						} else if (NdotH < 0) {
-							// NdotH is inverted in this coordinate system
-							const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * light.intensity;
+						} else {
+							// Clamp to avoid NaN from negative values with fractional exponents
+							const spec = Math.pow(Math.max(0, NdotH), specular.shininess) * specular.intensity * light.intensity;
 							r += light.color[0] * spec;
 							g += light.color[1] * spec;
 							b += light.color[2] * spec;
@@ -956,9 +956,9 @@ export function calculateMeshLighting(
 								if (Math.abs(NdotH) > 0.01) {
 									b -= 1.0;
 								}
-							} else if (NdotH < 0) {
-								// NdotH is inverted in this coordinate system
-								const spec = Math.pow(-NdotH, specular.shininess) * specular.intensity * spot.intensity * angularAtten * distAtten;
+							} else {
+								// Clamp to avoid NaN from negative values with fractional exponents
+								const spec = Math.pow(Math.max(0, NdotH), specular.shininess) * specular.intensity * spot.intensity * angularAtten * distAtten;
 								r += spot.color[0] * spec;
 								g += spot.color[1] * spec;
 								b += spot.color[2] * spec;
