@@ -290,9 +290,9 @@ function calculateLighting(positions, normals, outColors, posOffset, normalOffse
 		}
 
 		// Write output (clamped, alpha = 1)
-		outColors[off4] = r > 1 ? 1 : r;
-		outColors[off4 + 1] = g > 1 ? 1 : g;
-		outColors[off4 + 2] = b > 1 ? 1 : b;
+		outColors[off4] = r > 2 ? 2 : r;
+		outColors[off4 + 1] = g > 2 ? 2 : g;
+		outColors[off4 + 2] = b > 2 ? 2 : b;
 		outColors[off4 + 3] = 1;
 	}
 }

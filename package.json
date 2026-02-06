@@ -1,6 +1,6 @@
 {
   "name": "gltfstatic",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "glTF Static - Construct 3 plugin for loading static glTF 3D models",
   "main": "c3runtime/main.js",
   "scripts": {
