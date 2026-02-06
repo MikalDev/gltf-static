@@ -378,6 +378,32 @@
 								"desc": "Quaternion W component."
 							}
 						}
+					},
+					"set-animation-frame-skip": {
+						"list-name": "Set animation frame skip",
+						"display-text": "{my} set animation frame skip to [b]{0}[/b]",
+						"description": "Set the number of frames to skip between animation updates. Higher values improve performance. Instances are automatically staggered so they update on different frames.",
+						"params": {
+							"skip": {
+								"name": "Skip",
+								"desc": "Number of frames to skip (0 = update every frame, 1 = every 2nd frame, 2 = every 3rd frame, etc)."
+							}
+						}
+					},
+					"set-frame-skip-lighting": {
+						"list-name": "Set frame skip lighting",
+						"display-text": "{my} set frame skip lighting [b]{0}[/b]",
+						"description": "Set whether lighting is also skipped on skipped frames. When enabled (default), skipped frames render from existing GPU buffers for maximum performance.",
+						"params": {
+							"enabled": {
+								"name": "Enabled",
+								"desc": "Whether to skip lighting on skipped frames.",
+								"items": {
+									"disabled": "Disabled (update lighting every frame)",
+									"enabled": "Enabled (skip lighting too)"
+								}
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -570,6 +596,14 @@
 					"bone-count": {
 						"description": "Get the number of bones/nodes in the model.",
 						"translated-name": "BoneCount"
+					},
+					"animation-frame-skip": {
+						"description": "Get the current animation frame skip value.",
+						"translated-name": "AnimationFrameSkip"
+					},
+					"frame-skip-lighting": {
+						"description": "Returns 1 if lighting is skipped on skipped frames, 0 otherwise.",
+						"translated-name": "FrameSkipLighting"
 					}
 				}
 			}

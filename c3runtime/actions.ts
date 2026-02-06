@@ -99,6 +99,16 @@ C3.Plugins.GltfStatic.Acts =
 		this._setAnimationLoop(loop !== 0);
 	},
 
+	SetAnimationFrameSkip(this: SDKInstanceClass, skip: number): void
+	{
+		this._setAnimationFrameSkip(skip);
+	},
+
+	SetFrameSkipLighting(this: SDKInstanceClass, enabled: number): void
+	{
+		this._setFrameSkipLighting(enabled !== 0);
+	},
+
 	// Quaternion rotation actions
 	SetRotationQuaternion(this: SDKInstanceClass, json: string): void
 	{

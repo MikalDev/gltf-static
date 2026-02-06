@@ -103,6 +103,16 @@ C3.Plugins.GltfStatic.Exps =
 		return this._getAnimationNamesJson();
 	},
 
+	AnimationFrameSkip(this: SDKInstanceClass): number
+	{
+		return this._getAnimationFrameSkip();
+	},
+
+	FrameSkipLighting(this: SDKInstanceClass): number
+	{
+		return this._getFrameSkipLighting() ? 1 : 0;
+	},
+
 	// Bone attachment expressions
 	BoneX(this: SDKInstanceClass, name: string): number
 	{

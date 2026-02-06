@@ -115,7 +115,10 @@
 					{
 						"id": "enabled",
 						"type": "combo",
-						"items": ["disabled", "enabled"]
+						"items": [
+							"disabled",
+							"enabled"
+						]
 					}
 				]
 			},
@@ -131,7 +134,10 @@
 					{
 						"id": "visible",
 						"type": "combo",
-						"items": ["invisible", "visible"]
+						"items": [
+							"invisible",
+							"visible"
+						]
 					}
 				]
 			},
@@ -147,7 +153,10 @@
 					{
 						"id": "visible",
 						"type": "combo",
-						"items": ["invisible", "visible"]
+						"items": [
+							"invisible",
+							"visible"
+						]
 					}
 				]
 			},
@@ -410,7 +419,36 @@
 					{
 						"id": "loop",
 						"type": "combo",
-						"items": ["no", "yes"]
+						"items": [
+							"no",
+							"yes"
+						]
+					}
+				]
+			},
+			{
+				"id": "set-animation-frame-skip",
+				"scriptName": "SetAnimationFrameSkip",
+				"highlight": false,
+				"params": [
+					{
+						"id": "skip",
+						"type": "number"
+					}
+				]
+			},
+			{
+				"id": "set-frame-skip-lighting",
+				"scriptName": "SetFrameSkipLighting",
+				"highlight": false,
+				"params": [
+					{
+						"id": "enabled",
+						"type": "combo",
+						"items": [
+							"disabled",
+							"enabled"
+						]
 					}
 				]
 			}
@@ -461,6 +499,16 @@
 				"id": "animation-names",
 				"expressionName": "AnimationNames",
 				"returnType": "string"
+			},
+			{
+				"id": "animation-frame-skip",
+				"expressionName": "AnimationFrameSkip",
+				"returnType": "number"
+			},
+			{
+				"id": "frame-skip-lighting",
+				"expressionName": "FrameSkipLighting",
+				"returnType": "number"
 			}
 		]
 	},

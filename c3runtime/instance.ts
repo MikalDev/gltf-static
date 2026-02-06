@@ -99,10 +99,23 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_drawCount: number = 0;
 	_lastDrawTime: number = 0;
 
+	// Animation frame skip (performance optimization)
+	_animationFrameSkip: number = 0;      // How many frames to skip (0 = update every frame)
+	_frameCounter: number = 0;            // Current frame counter
+	_accumulatedDt: number = 0;           // Accumulated delta time
+	_frameOffset: number = 0;             // Stagger offset to spread instances across frames
+	_frameSkipIncludesLighting: boolean = true;  // When true, lighting is also skipped on skipped frames
+
+	// Static counter for generating stagger offsets
+	static _instanceCounter: number = 0;
+
 	constructor()
 	{
 		super();
 		debugLog("Instance created");
+
+		// Assign stagger offset from static counter (wraps automatically when used with modulo)
+		this._frameOffset = GltfStaticInstance._instanceCounter++;
 
 		// SDK v2: Initialize from properties in constructor
 		const props = this._getInitProperties();
@@ -218,27 +231,57 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	/**
 	 * Called once per frame when ticking is enabled.
 	 * Updates animation and ensures C3 redraws when model is loaded.
+	 * Supports frame skipping for performance - animation updates every (frameSkip + 1) frames
+	 * while maintaining correct animation speed via accumulated delta time.
+	 * When _frameSkipIncludesLighting is true (default), lighting is also skipped on skipped frames,
+	 * rendering from existing GPU buffers for maximum performance.
 	 */
 	_tick(): void
 	{
 		if (!this._model?.isLoaded) return;
 
+		// Always accumulate delta time for animation
+		const dt = this.runtime.dt;
+		this._accumulatedDt += dt;
+		this._frameCounter++;
+
+		// Check if this frame should do a full update (animation + lighting)
+		// Stagger offset spreads instances across frames so they don't all update simultaneously
+		const updateInterval = this._animationFrameSkip + 1;
+		const shouldUpdate = ((this._frameCounter + this._frameOffset) % updateInterval) === 0;
+
 		// Update animation if playing
 		if (this._animationController?.isPlaying())
 		{
-			this._animationController.update(this.runtime.dt);
+			if (shouldUpdate)
+			{
+				// Use accumulated delta time to maintain correct animation speed
+				this._animationController.update(this._accumulatedDt);
 
-			// Sync node hierarchy with animated joint transforms
-			this._model.updateJointNodes(this._animationController);
+				// Sync node hierarchy with animated joint transforms
+				this._model.updateJointNodes(this._animationController);
 
-			// Update static meshes under animated joints (uses node world matrices)
-			this._model.updateStaticMeshTransforms();
+				// Update static meshes under animated joints (uses node world matrices)
+				this._model.updateStaticMeshTransforms();
 
-			this._updateSkinnedMeshes();
+				this._updateSkinnedMeshes();
+
+				// Reset accumulated delta time after update
+				this._accumulatedDt = 0;
+			}
+		}
+		else
+		{
+			// Not playing - reset accumulated time to avoid buildup
+			this._accumulatedDt = 0;
 		}
 
-		// Apply lighting to all meshes (uses dirty tracking - skips if unchanged)
-		this._applyLightingToAllMeshes();
+		// Apply lighting only on update frames (when frameSkipIncludesLighting is true)
+		// On skipped frames, just render from existing GPU buffers for maximum performance
+		if (shouldUpdate || !this._frameSkipIncludesLighting)
+		{
+			this._applyLightingToAllMeshes();
+		}
 
 		this.runtime.sdk.updateRender();
 	}
@@ -1028,6 +1071,53 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		const names = this._animationController?.getAnimationNames() ??
 			this._model?.animations.map(a => a.name) ?? [];
 		return JSON.stringify(names);
+	}
+
+	// ========================================================================
+	// Animation Frame Skip Methods (Performance Optimization)
+	// ========================================================================
+
+	/**
+	 * Set the number of frames to skip between animation updates.
+	 * 0 = update every frame, 1 = update every 2nd frame, etc.
+	 * Animation speed is maintained by accumulating delta time.
+	 * @param skip Number of frames to skip (0 or greater)
+	 */
+	_setAnimationFrameSkip(skip: number): void
+	{
+		this._animationFrameSkip = Math.max(0, Math.floor(skip));
+		// Reset counters when changing frame skip to avoid stale state
+		this._frameCounter = 0;
+		this._accumulatedDt = 0;
+	}
+
+	/**
+	 * Get the current animation frame skip value.
+	 * @returns Number of frames being skipped (0 = every frame)
+	 */
+	_getAnimationFrameSkip(): number
+	{
+		return this._animationFrameSkip;
+	}
+
+	/**
+	 * Set whether lighting updates are also skipped on skipped frames.
+	 * When enabled (default), skipped frames render from existing GPU buffers
+	 * without recalculating lighting, providing maximum performance benefit.
+	 * @param enabled Whether to include lighting in frame skip
+	 */
+	_setFrameSkipLighting(enabled: boolean): void
+	{
+		this._frameSkipIncludesLighting = enabled;
+	}
+
+	/**
+	 * Get whether lighting updates are skipped on skipped frames.
+	 * @returns true if lighting is included in frame skip (default)
+	 */
+	_getFrameSkipLighting(): boolean
+	{
+		return this._frameSkipIncludesLighting;
 	}
 
 	async _loadModel(url: string): Promise<void>
