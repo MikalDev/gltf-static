@@ -11,7 +11,7 @@ const PROP_SCALE = "scale";
 const DEG_TO_RAD = Math.PI / 180;
 
 // Model loading debug logging
-const modelLoadDebug = false;
+const modelLoadDebug = true;
 const LOG_PREFIX = "[GltfStaticEditor]";
 
 function modelLoadLog(...args: unknown[]): void {
@@ -19,8 +19,21 @@ function modelLoadLog(...args: unknown[]): void {
 }
 
 function modelLoadWarn(...args: unknown[]): void {
-	if (modelLoadDebug) console.warn(LOG_PREFIX, ...args);
+	// Always log warnings (not gated by debug flag)
+	console.warn(LOG_PREFIX, ...args);
 }
+
+/** Cached editor model with reference count */
+interface EditorCacheEntry {
+	model: EditorGltfModel;
+	refCount: number;
+}
+
+/** Model cache keyed by project file path */
+const editorModelCache = new Map<string, EditorCacheEntry>();
+
+/** Loading promises for deduplication - prevents concurrent loads of same URL */
+const editorModelLoading = new Map<string, Promise<EditorGltfModel>>();
 
 /** Raw mesh data for editor rendering */
 interface EditorMeshData {
@@ -181,11 +194,24 @@ function transformPoint(out: number[], p: number[], m: Float32Array): void {
 
 /**
  * Editor glTF model - stores parsed mesh data for CPU rendering.
+ * Textures are created lazily and shared across all instances using this model.
  */
 class EditorGltfModel {
 	private _meshes: EditorMeshData[] = [];
 	private _images: ImageBitmap[] = [];
 	private _isLoaded: boolean = false;
+
+	// Shared textures (created on first draw, reused by all instances)
+	private _textures: SDK.Gfx.IWebGLTexture[] = [];
+	private _texturesCreated: boolean = false;
+	private _lastRenderer: SDK.Gfx.IWebGLRenderer | null = null;
+
+	// Track async texture creation state
+	texturesCreating: boolean = false;
+
+	get texturesCreated(): boolean {
+		return this._texturesCreated;
+	}
 
 	get isLoaded(): boolean {
 		return this._isLoaded;
@@ -197,6 +223,10 @@ class EditorGltfModel {
 
 	get images(): ImageBitmap[] {
 		return this._images;
+	}
+
+	get textures(): SDK.Gfx.IWebGLTexture[] {
+		return this._textures;
 	}
 
 	/**
@@ -340,12 +370,14 @@ class EditorGltfModel {
 				const bufferView = doc.bufferViews?.[image.bufferView];
 				if (!bufferView) {
 					modelLoadWarn(`Image ${i}: bufferView not found`);
+					this._images[i] = null as unknown as ImageBitmap;
 					continue;
 				}
 
 				const buffer = buffers[bufferView.buffer];
 				if (!buffer) {
 					modelLoadWarn(`Image ${i}: buffer not found`);
+					this._images[i] = null as unknown as ImageBitmap;
 					continue;
 				}
 
@@ -357,6 +389,7 @@ class EditorGltfModel {
 				modelLoadLog(`Image ${i}: ${imageBitmap.width}x${imageBitmap.height}`);
 			} catch (err) {
 				modelLoadWarn(`Image ${i}: decode failed:`, err);
+				this._images[i] = null as unknown as ImageBitmap;
 			}
 		}
 	}
@@ -590,10 +623,103 @@ class EditorGltfModel {
 	}
 
 	/**
-	 * Release all resources.
+	 * Ensure WebGL textures are created from ImageBitmaps.
+	 * Called on first draw, textures are then shared by all instances.
+	 * Uses CreateDynamicTexture + UpdateTexture (editor SDK pattern).
+	 */
+	ensureTextures(renderer: SDK.Gfx.IWebGLRenderer): void {
+		if (this._texturesCreated || !this._isLoaded) return;
+
+		this._texturesCreated = true;
+		this._lastRenderer = renderer;
+
+		const imageCount = this._images.length;
+		modelLoadLog(`Creating ${imageCount} shared WebGL textures...`);
+		modelLoadLog(`Renderer type: ${renderer?.constructor?.name ?? typeof renderer}`);
+		modelLoadLog(`Renderer methods available:`, {
+			CreateDynamicTexture: typeof (renderer as unknown as Record<string, unknown>).CreateDynamicTexture,
+			UpdateTexture: typeof (renderer as unknown as Record<string, unknown>).UpdateTexture,
+			DeleteTexture: typeof (renderer as unknown as Record<string, unknown>).DeleteTexture
+		});
+
+		for (let i = 0; i < imageCount; i++) {
+			const textureIndex = i; // Capture index for logging
+			const img = this._images[i];
+
+			// Log image state before processing
+			modelLoadLog(`Texture ${textureIndex}: ImageBitmap state:`, {
+				exists: !!img,
+				width: img?.width ?? 'N/A',
+				height: img?.height ?? 'N/A',
+				type: img?.constructor?.name ?? typeof img
+			});
+
+			// Skip missing, closed, or invalid ImageBitmaps
+			if (!img || img.width === 0 || img.height === 0) {
+				this._textures[textureIndex] = null as unknown as SDK.Gfx.IWebGLTexture;
+				modelLoadWarn(`Texture ${textureIndex}: skipped - invalid ImageBitmap`);
+				continue;
+			}
+
+			const imgWidth = img.width;
+			const imgHeight = img.height;
+
+			try {
+				// Editor SDK: CreateDynamicTexture + UpdateTexture
+				// Note: Disable mipMap as it may cause internal "hint" errors in UpdateTexture
+				modelLoadLog(`Texture ${textureIndex}: calling CreateDynamicTexture(${imgWidth}, ${imgHeight})`);
+
+				const tex = renderer.CreateDynamicTexture(imgWidth, imgHeight, {
+					sampling: "bilinear",
+					mipMap: false,
+					wrapX: "repeat",
+					wrapY: "repeat"
+				});
+
+				modelLoadLog(`Texture ${textureIndex}: CreateDynamicTexture returned:`, {
+					result: tex,
+					type: tex?.constructor?.name ?? typeof tex
+				});
+
+				modelLoadLog(`Texture ${textureIndex}: calling UpdateTexture with ImageBitmap ${imgWidth}x${imgHeight}`);
+				renderer.UpdateTexture(img, tex, { premultiplyAlpha: false });
+				modelLoadLog(`Texture ${textureIndex}: UpdateTexture completed`);
+
+				this._textures[textureIndex] = tex;
+				modelLoadLog(`Texture ${textureIndex}: created successfully ${imgWidth}x${imgHeight}`);
+			} catch (err) {
+				const errorMessage = err instanceof Error ? err.message : String(err);
+				const errorStack = err instanceof Error ? err.stack : undefined;
+				modelLoadWarn(`Texture ${textureIndex}: creation failed:`, {
+					error: errorMessage,
+					stack: errorStack,
+					imgWidth,
+					imgHeight
+				});
+				this._textures[textureIndex] = null as unknown as SDK.Gfx.IWebGLTexture;
+			}
+		}
+
+		modelLoadLog(`Texture creation complete: ${this._textures.filter(t => t !== null).length}/${imageCount} succeeded`);
+	}
+
+	/**
+	 * Release all resources including textures.
 	 */
 	release(): void {
+		// Delete WebGL textures
+		if (this._lastRenderer) {
+			for (const tex of this._textures) {
+				if (tex) this._lastRenderer.DeleteTexture(tex);
+			}
+		}
+		this._textures = [];
+		this._texturesCreated = false;
+		this._lastRenderer = null;
+
+		// Release mesh data
 		this._meshes = [];
+
 		// Close ImageBitmaps to free resources
 		for (const img of this._images) {
 			if (img) img.close();
@@ -605,18 +731,13 @@ class EditorGltfModel {
 
 PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanceBase
 {
-	// Model state
+	// Model state (model is shared via cache, textures are on the model)
 	_model: EditorGltfModel | null = null;
 	_isLoading: boolean = false;
 	_lastModelUrl: string = "";
-
-	// Texture cache (WebGL textures created from model images)
-	_textures: SDK.Gfx.IWebGLTexture[] = [];
-	_texturesCreated: boolean = false;
-	_lastRenderer: SDK.Gfx.IWebGLRenderer | null = null;
 	_layoutView: SDK.UI.ILayoutView | null = null;
 
-	// Transform cache
+	// Transform cache (per-instance since each instance has different position/rotation)
 	_transformedMeshes: { positions: Float32Array; uvs: Float32Array; indices: Uint16Array; textureIndex: number }[] = [];
 	_lastTransformKey: string = "";
 
@@ -627,28 +748,15 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 
 	Release(): void
 	{
-		this._releaseTextures();
-		this._lastRenderer = null;
 		this._layoutView = null;
-		if (this._model)
+
+		// Release from cache (decrements refCount, textures freed when refCount hits 0)
+		if (this._model && this._lastModelUrl)
 		{
-			this._model.release();
+			this._releaseModelFromCache(this._lastModelUrl);
 			this._model = null;
 		}
 		this._transformedMeshes = [];
-	}
-
-	_releaseTextures(): void
-	{
-		if (this._lastRenderer)
-		{
-			for (const tex of this._textures)
-			{
-				if (tex) this._lastRenderer.DeleteTexture(tex);
-			}
-		}
-		this._textures = [];
-		this._texturesCreated = false;
 	}
 
 	OnCreate(): void
@@ -672,28 +780,141 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 	}
 
 	/**
-	 * Load glTF model from project file
-	 * DISABLED: Editor now only shows placeholder image for performance
+	 * Get cached model or load it, handling concurrent requests.
+	 * Multiple instances loading the same URL will share one load operation.
+	 */
+	async _getOrLoadModel(url: string): Promise<EditorGltfModel>
+	{
+		// Check cache first
+		const cached = editorModelCache.get(url);
+		if (cached)
+		{
+			cached.refCount++;
+			modelLoadLog(`Cache hit: ${url}, refCount=${cached.refCount}`);
+			return cached.model;
+		}
+
+		// Check if load already in progress - just wait for it
+		const loading = editorModelLoading.get(url);
+		if (loading)
+		{
+			modelLoadLog(`Joining existing load: ${url}`);
+			await loading;
+			// After load completes, get from cache (handles both success and failure uniformly)
+			return this._getOrLoadModel(url);
+		}
+
+		// Start new load
+		modelLoadLog(`Starting new load: ${url}`);
+		const loadPromise = this._doModelLoad(url);
+		editorModelLoading.set(url, loadPromise);
+
+		try
+		{
+			const model = await loadPromise;
+			editorModelCache.set(url, { model, refCount: 1 });
+			modelLoadLog(`Cached: ${url}, refCount=1`);
+			return model;
+		}
+		finally
+		{
+			editorModelLoading.delete(url);
+		}
+	}
+
+	/**
+	 * Perform the actual model load from project file.
+	 */
+	async _doModelLoad(url: string): Promise<EditorGltfModel>
+	{
+		const projectFile = this.GetProject().GetProjectFileByExportPath(url);
+		if (!projectFile)
+		{
+			throw new Error(`Project file not found: ${url}`);
+		}
+
+		const blob = projectFile.GetBlob();
+		const arrayBuffer = await blob.arrayBuffer();
+
+		const model = new EditorGltfModel();
+		await model.loadFromBuffer(arrayBuffer, url);
+		return model;
+	}
+
+	/**
+	 * Release model reference from cache.
+	 * Model is only freed when refCount reaches 0.
+	 */
+	_releaseModelFromCache(url: string): void
+	{
+		const entry = editorModelCache.get(url);
+		if (!entry) return;
+
+		entry.refCount--;
+		modelLoadLog(`Released: ${url}, refCount=${entry.refCount}`);
+
+		if (entry.refCount <= 0)
+		{
+			entry.model.release();
+			editorModelCache.delete(url);
+			modelLoadLog(`Deleted from cache: ${url}`);
+		}
+	}
+
+	/**
+	 * Clear current model and release from cache.
+	 */
+	_clearModel(): void
+	{
+		if (this._model && this._lastModelUrl)
+		{
+			this._releaseModelFromCache(this._lastModelUrl);
+		}
+		this._model = null;
+		this._transformedMeshes = [];
+		this._lastModelUrl = "";
+	}
+
+	/**
+	 * Load glTF model from project file with caching.
 	 */
 	async _loadModel(url: string): Promise<void>
 	{
-		// Skip model loading in editor - only use placeholder image
-		modelLoadLog("Model loading disabled in editor, using placeholder only:", url);
-		this._isLoading = false;
+		// Clear if no URL
+		if (!url)
+		{
+			this._clearModel();
+			return;
+		}
+
+		// Skip if same URL already loaded
+		if (url === this._lastModelUrl && this._model?.isLoaded)
+		{
+			return;
+		}
+
+		// Release previous model from cache
+		this._clearModel();
+
+		this._isLoading = true;
 		this._lastModelUrl = url;
 
-		// Release any existing model
-		if (this._model)
+		try
 		{
-			this._model.release();
+			this._model = await this._getOrLoadModel(url);
+			modelLoadLog("Model ready:", url);
+		}
+		catch (err)
+		{
+			modelLoadWarn("Load failed:", url, err);
 			this._model = null;
 		}
-		this._releaseTextures();
-		this._transformedMeshes = [];
-
-		// Request redraw to show placeholder
-		if (this._layoutView)
-			this._layoutView.Refresh();
+		finally
+		{
+			this._isLoading = false;
+			if (this._layoutView)
+				this._layoutView.Refresh();
+		}
 	}
 
 	/**
@@ -732,12 +953,11 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 		const x = this._inst.GetX();
 		const y = this._inst.GetY();
 		const z = this._inst.GetZElevation();
-		const width = this._inst.GetWidth();
 		const angle = this._inst.GetAngle();
 		const rotX = ((this._inst.GetPropertyValue(PROP_ROTATION_X) as number) ?? 0) * DEG_TO_RAD;
 		const rotY = ((this._inst.GetPropertyValue(PROP_ROTATION_Y) as number) ?? 0) * DEG_TO_RAD;
 		const rotZ = ((this._inst.GetPropertyValue(PROP_ROTATION_Z) as number) ?? 0) * DEG_TO_RAD;
-		const scale = ((this._inst.GetPropertyValue(PROP_SCALE) as number) ?? 1) * width;
+		const scale = (this._inst.GetPropertyValue(PROP_SCALE) as number) ?? 1;
 
 		// Build 4x4 transform matrix
 		// Order: Scale -> 3D Rotations -> 2D Angle -> Translation
@@ -797,49 +1017,6 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 		}
 	}
 
-	/**
-	 * Create WebGL textures from model ImageBitmaps
-	 */
-	_createTextures(iRenderer: SDK.Gfx.IWebGLRenderer): void
-	{
-		if (this._texturesCreated || !this._model?.isLoaded) return;
-
-		this._texturesCreated = true;
-		this._lastRenderer = iRenderer;
-
-		const images = this._model.images;
-		modelLoadLog(`Creating ${images.length} WebGL textures...`);
-
-		for (let i = 0; i < images.length; i++)
-		{
-			const img = images[i];
-			if (!img)
-			{
-				this._textures[i] = null as unknown as SDK.Gfx.IWebGLTexture;
-				continue;
-			}
-
-			try
-			{
-				// Create dynamic texture with repeat wrapping (glTF default)
-				const tex = iRenderer.CreateDynamicTexture(img.width, img.height, {
-					wrapX: "repeat",
-					wrapY: "repeat",
-					sampling: "trilinear",
-					mipMap: true
-				});
-				iRenderer.UpdateTexture(img, tex, { premultiplyAlpha: true });
-				this._textures[i] = tex;
-				modelLoadLog(`Texture ${i}: ${img.width}x${img.height}`);
-			}
-			catch (err)
-			{
-				modelLoadWarn(`Texture ${i}: creation failed:`, err);
-				this._textures[i] = null as unknown as SDK.Gfx.IWebGLTexture;
-			}
-		}
-	}
-
 	Draw(iRenderer: SDK.Gfx.IWebGLRenderer, iDrawParams: SDK.Gfx.IDrawParams): void
 	{
 		// Store layout view for refresh after async loads
@@ -851,13 +1028,17 @@ PLUGIN_CLASS.Instance = class GltfStaticEditorInstance extends SDK.IWorldInstanc
 			// Update transformed positions if needed
 			this._updateTransformedMeshes();
 
-			// Create WebGL textures if not already done
-			this._createTextures(iRenderer);
+			// Create textures if not done (synchronous in editor SDK)
+			if (!this._model.texturesCreated && !this._model.texturesCreating)
+			{
+				this._model.texturesCreating = true;
+				this._model.ensureTextures(iRenderer);
+			}
 
-			// Draw each mesh
+			// Draw each mesh using shared textures from the model
 			for (const mesh of this._transformedMeshes)
 			{
-				const tex = mesh.textureIndex >= 0 ? this._textures[mesh.textureIndex] : null;
+				const tex = mesh.textureIndex >= 0 ? this._model.textures[mesh.textureIndex] : null;
 
 				if (tex)
 				{
