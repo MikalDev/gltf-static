@@ -109,6 +109,16 @@ C3.Plugins.GltfStatic.Acts =
 		this._setFrameSkipLighting(enabled !== 0);
 	},
 
+	SetDistanceLodEnabled(this: SDKInstanceClass, enabled: number): void
+	{
+		this._setDistanceLodEnabled(enabled !== 0);
+	},
+
+	SetDistanceLodThresholds(this: SDKInstanceClass, near: number, far: number, maxSkip: number): void
+	{
+		this._setDistanceLodThresholds(near, far, maxSkip);
+	},
+
 	// Quaternion rotation actions
 	SetRotationQuaternion(this: SDKInstanceClass, json: string): void
 	{

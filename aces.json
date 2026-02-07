@@ -451,6 +451,40 @@
 						]
 					}
 				]
+			},
+			{
+				"id": "set-distance-lod-enabled",
+				"scriptName": "SetDistanceLodEnabled",
+				"highlight": false,
+				"params": [
+					{
+						"id": "enabled",
+						"type": "combo",
+						"items": [
+							"disabled",
+							"enabled"
+						]
+					}
+				]
+			},
+			{
+				"id": "set-distance-lod-thresholds",
+				"scriptName": "SetDistanceLodThresholds",
+				"highlight": false,
+				"params": [
+					{
+						"id": "fullrateradius",
+						"type": "number"
+					},
+					{
+						"id": "maxskipdistance",
+						"type": "number"
+					},
+					{
+						"id": "maxskip",
+						"type": "number"
+					}
+				]
 			}
 		],
 		"expressions": [
@@ -508,6 +542,16 @@
 			{
 				"id": "frame-skip-lighting",
 				"expressionName": "FrameSkipLighting",
+				"returnType": "number"
+			},
+			{
+				"id": "distance-lod-enabled",
+				"expressionName": "DistanceLodEnabled",
+				"returnType": "number"
+			},
+			{
+				"id": "effective-frame-skip",
+				"expressionName": "EffectiveFrameSkip",
 				"returnType": "number"
 			}
 		]

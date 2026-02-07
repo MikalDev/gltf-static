@@ -106,6 +106,12 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_frameOffset: number = 0;             // Stagger offset to spread instances across frames
 	_frameSkipIncludesLighting: boolean = true;  // When true, lighting is also skipped on skipped frames
 
+	// Distance-based LOD for animation frame skip
+	_distanceLodEnabled: boolean = false;  // When true, frame skip is calculated from camera distance
+	_lodFullRateRadius: number = 500;      // No skip within this radius (always full update rate)
+	_lodMaxSkipDistance: number = 2000;    // Maximum frame skip at this distance and beyond
+	_lodMaxFrameSkip: number = 5;          // Maximum frame skip when at/beyond max distance
+
 	// Static counter for generating stagger offsets
 	static _instanceCounter: number = 0;
 
@@ -245,9 +251,14 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		this._accumulatedDt += dt;
 		this._frameCounter++;
 
+		// Determine effective frame skip: use distance-based LOD if enabled, else manual setting
+		const effectiveFrameSkip = this._distanceLodEnabled
+			? this._calculateDistanceFrameSkip()
+			: this._animationFrameSkip;
+
 		// Check if this frame should do a full update (animation + lighting)
 		// Stagger offset spreads instances across frames so they don't all update simultaneously
-		const updateInterval = this._animationFrameSkip + 1;
+		const updateInterval = effectiveFrameSkip + 1;
 		const shouldUpdate = ((this._frameCounter + this._frameOffset) % updateInterval) === 0;
 
 		// Update animation if playing
@@ -1091,6 +1102,69 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 		this._accumulatedDt = 0;
 	}
 
+	// ========================================================================
+	// Distance-Based LOD Methods
+	// ========================================================================
+
+	/**
+	 * Calculate frame skip based on distance to camera.
+	 * Uses linear interpolation between near (skip=0) and far (skip=max).
+	 */
+	_calculateDistanceFrameSkip(): number
+	{
+		const camPos = this._getCameraPosition();
+		const dx = this.x - camPos[0];
+		const dy = this.y - camPos[1];
+		const dz = this.totalZElevation - camPos[2];
+		const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+		if (distance <= this._lodFullRateRadius) return 0;
+		if (distance >= this._lodMaxSkipDistance) return this._lodMaxFrameSkip;
+
+		// Linear interpolation
+		const t = (distance - this._lodFullRateRadius) / (this._lodMaxSkipDistance - this._lodFullRateRadius);
+		return Math.floor(t * this._lodMaxFrameSkip);
+	}
+
+	/**
+	 * Enable or disable distance-based LOD for animation frame skip.
+	 */
+	_setDistanceLodEnabled(enabled: boolean): void
+	{
+		this._distanceLodEnabled = enabled;
+	}
+
+	/**
+	 * Check if distance-based LOD is enabled.
+	 */
+	_getDistanceLodEnabled(): boolean
+	{
+		return this._distanceLodEnabled;
+	}
+
+	/**
+	 * Configure distance LOD thresholds.
+	 * @param fullRateRadius Radius within which full update rate is used (no skip)
+	 * @param maxSkipDistance Distance at which maximum frame skip is used
+	 * @param maxSkip Maximum frame skip value at max distance
+	 */
+	_setDistanceLodThresholds(fullRateRadius: number, maxSkipDistance: number, maxSkip: number): void
+	{
+		this._lodFullRateRadius = Math.max(0, fullRateRadius);
+		this._lodMaxSkipDistance = Math.max(this._lodFullRateRadius + 1, maxSkipDistance);
+		this._lodMaxFrameSkip = Math.max(0, Math.floor(maxSkip));
+	}
+
+	/**
+	 * Get the current effective frame skip (accounting for distance LOD if enabled).
+	 */
+	_getEffectiveFrameSkip(): number
+	{
+		return this._distanceLodEnabled
+			? this._calculateDistanceFrameSkip()
+			: this._animationFrameSkip;
+	}
+
 	/**
 	 * Get the current animation frame skip value.
 	 * @returns Number of frames being skipped (0 = every frame)
@@ -1770,6 +1844,110 @@ C3.Plugins.GltfStatic.Instance = class GltfStaticInstance extends ISDKWorldInsta
 	_getDebug(): boolean
 	{
 		return this._debug;
+	}
+
+	// ========================================================================
+	// Debugger Properties (C3 Debugger Panel)
+	// ========================================================================
+
+	/**
+	 * Return properties to show in the C3 debugger panel.
+	 * Updates in real-time when the debugger is open.
+	 */
+	_getDebuggerProperties(): object[]
+	{
+		const props: object[] = [];
+
+		// Frame Skip section
+		props.push({
+			title: "Frame Skip",
+			properties: [
+				{
+					name: "Distance LOD Enabled",
+					value: this._distanceLodEnabled
+				},
+				{
+					name: "Manual Frame Skip",
+					value: this._animationFrameSkip
+				},
+				{
+					name: "Effective Frame Skip",
+					value: this._getEffectiveFrameSkip()
+				},
+				{
+					name: "Full Rate Radius",
+					value: this._lodFullRateRadius
+				},
+				{
+					name: "Max Skip Distance",
+					value: this._lodMaxSkipDistance
+				},
+				{
+					name: "Max Frame Skip",
+					value: this._lodMaxFrameSkip
+				},
+				{
+					name: "Skip Lighting Too",
+					value: this._frameSkipIncludesLighting
+				}
+			]
+		});
+
+		// Distance section (only if LOD enabled and model loaded)
+		if (this._distanceLodEnabled && this._model?.isLoaded)
+		{
+			const camPos = this._getCameraPosition();
+			const dx = this.x - camPos[0];
+			const dy = this.y - camPos[1];
+			const dz = this.totalZElevation - camPos[2];
+			const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+			props.push({
+				title: "Distance LOD Info",
+				properties: [
+					{
+						name: "Distance to Camera",
+						value: Math.round(distance)
+					},
+					{
+						name: "Camera Position",
+						value: `(${Math.round(camPos[0])}, ${Math.round(camPos[1])}, ${Math.round(camPos[2])})`
+					},
+					{
+						name: "Update Rate",
+						value: `1/${this._getEffectiveFrameSkip() + 1} frames`
+					}
+				]
+			});
+		}
+
+		// Animation section (if animation controller exists)
+		if (this._animationController)
+		{
+			props.push({
+				title: "Animation",
+				properties: [
+					{
+						name: "Current Animation",
+						value: this._getAnimationName() || "(none)"
+					},
+					{
+						name: "Playing",
+						value: this._isAnimationPlaying()
+					},
+					{
+						name: "Time",
+						value: `${this._getAnimationTime().toFixed(2)}s / ${this._getAnimationDuration().toFixed(2)}s`
+					},
+					{
+						name: "Speed",
+						value: this._getAnimationSpeed()
+					}
+				]
+			});
+		}
+
+		return props;
 	}
 
 	_saveToJson(): JSONValue

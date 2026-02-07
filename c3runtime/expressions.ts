@@ -113,6 +113,16 @@ C3.Plugins.GltfStatic.Exps =
 		return this._getFrameSkipLighting() ? 1 : 0;
 	},
 
+	DistanceLodEnabled(this: SDKInstanceClass): number
+	{
+		return this._getDistanceLodEnabled() ? 1 : 0;
+	},
+
+	EffectiveFrameSkip(this: SDKInstanceClass): number
+	{
+		return this._getEffectiveFrameSkip();
+	},
+
 	// Bone attachment expressions
 	BoneX(this: SDKInstanceClass, name: string): number
 	{

@@ -404,6 +404,40 @@
 								}
 							}
 						}
+					},
+					"set-distance-lod-enabled": {
+						"list-name": "Set distance LOD enabled",
+						"display-text": "{my} set distance LOD [b]{0}[/b]",
+						"description": "Enable or disable automatic frame skip based on distance to camera. When enabled, objects further from the camera update less frequently.",
+						"params": {
+							"enabled": {
+								"name": "Enabled",
+								"desc": "Whether to enable distance-based LOD.",
+								"items": {
+									"disabled": "Disabled",
+									"enabled": "Enabled"
+								}
+							}
+						}
+					},
+					"set-distance-lod-thresholds": {
+						"list-name": "Set distance LOD thresholds",
+						"display-text": "{my} set distance LOD: full rate radius [b]{0}[/b], max skip at [b]{1}[/b], max skip [b]{2}[/b]",
+						"description": "Configure distance LOD thresholds. Objects within 'full rate radius' always update every frame. Beyond that, frame skip increases linearly until 'max skip distance'.",
+						"params": {
+							"fullrateradius": {
+								"name": "Full rate radius",
+								"desc": "Objects within this radius always update every frame - no skipping (default 500)."
+							},
+							"maxskipdistance": {
+								"name": "Max skip distance",
+								"desc": "Distance at which maximum frame skip is reached (default 2000). Between full rate radius and this, skip interpolates linearly."
+							},
+							"maxskip": {
+								"name": "Max frame skip",
+								"desc": "Maximum frames to skip at max distance (default 5). Higher = better performance, choppier animation."
+							}
+						}
 					}
 				},
 				"expressions": {
@@ -604,6 +638,14 @@
 					"frame-skip-lighting": {
 						"description": "Returns 1 if lighting is skipped on skipped frames, 0 otherwise.",
 						"translated-name": "FrameSkipLighting"
+					},
+					"distance-lod-enabled": {
+						"description": "Returns 1 if distance-based LOD is enabled, 0 otherwise.",
+						"translated-name": "DistanceLodEnabled"
+					},
+					"effective-frame-skip": {
+						"description": "Get the current effective frame skip value (accounting for distance LOD if enabled).",
+						"translated-name": "EffectiveFrameSkip"
 					}
 				}
 			}
